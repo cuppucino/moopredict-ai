@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Testing
+coverage/
+
+# Production
+dist/
+build/
+
+# Misc
+.DS_Store
+.env
+.env.local
+.env.production
+.env.staging
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.tsx/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project specific
+logs/
+temp/
+scratch/
+python/ml_service/venv/
+python/ml_service/__pycache__/
+python/ml_service/*.pyc
+python/ml_service/.env
