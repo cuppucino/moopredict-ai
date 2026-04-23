@@ -46,7 +46,11 @@ export const sendTelegramMessage = async (
         parse_mode: 'Markdown',
       }, { timeout: 5000 });
 
-      return response.data?.ok === true;
+      if (response.data?.ok === true) {
+        logger.info("[Telegram] Message sent successfully");
+        return true;
+      }
+      return false;
     } catch (error: any) {
       logger.error(`[Telegram] Failed to send: ${error.message}`);
       return false;

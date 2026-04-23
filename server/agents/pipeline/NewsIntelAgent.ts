@@ -3,6 +3,11 @@ import { query } from '../../db/postgres';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 
+import { logger } from '../../core/Logger';
+import { v4 as uuidv4 } from 'uuid';
+import { createRequire } from "module";
+const _require = createRequire(import.meta.url);
+const yahooFinance = _require("yahoo-finance2").default;
 export interface NewsIntelBatch {
   correlation_id: string;
   timestamp: string | Date;
@@ -13,11 +18,10 @@ export interface NewsIntelBatch {
 export class NewsIntelAgent {
   private parser: Parser;
   private sources = [
-    { name: 'Yahoo Finance', url: 'https://finance.yahoo.com/news/rss' },
+    { name: 'Yahoo Finance RSS', url: 'https://finance.yahoo.com/news/rss' },
     { name: 'Google News', url: 'https://news.google.com/rss/search?q=finance+when:2h' },
     { name: 'MarketWatch', url: 'https://www.marketwatch.com/rss/topstories' },
-    { name: 'SCMP Business', url: 'https://www.scmp.com/rss/318210/feed' },
-    { name: 'Reuters', url: 'https://www.reutersagency.com/feed/' }
+    { name: 'SCMP Business', url: 'https://www.scmp.com/rss/318210/feed' }
   ];
 
   constructor() {
@@ -28,13 +32,13 @@ export class NewsIntelAgent {
    * Scrapes all broad news sources
    */
   public async scrapeBroadNews(): Promise<NewsIntelBatch> {
-    console.log('[NewsIntelAgent] Starting broad news scrape...');
+    logger.info('[NewsIntelAgent] Starting broad news scrape...');
     const allArticles: any[] = [];
     const headlines: string[] = [];
 
     for (const source of this.sources) {
       try {
-        console.log(`[NewsIntelAgent] Scraping ${source.name}...`);
+        logger.info(`[NewsIntelAgent] Scraping ${source.name}...`);
         const feed = await this.parser.parseURL(source.url);
         
         for (const item of feed.items) {
@@ -52,17 +56,40 @@ export class NewsIntelAgent {
           headlines.push(item.title);
         }
       } catch (error) {
-        console.error(`[NewsIntelAgent] Error scraping ${source.name}:`, error);
+        logger.error(`[NewsIntelAgent] Error scraping ${source.name}:`, { error });
       }
+    }
+
+    // Modern Fallback: Yahoo Finance Search for broad trends
+    try {
+      logger.info(`[NewsIntelAgent] Scraping Yahoo Finance Search for broad trends...`);
+      const searchTerms = ['stock market news', 'financial market trends', 'breaking economy news'];
+      for (const term of searchTerms) {
+        const result: any = await yahooFinance.search(term, { newsCount: 5, quotesCount: 0 });
+        const newsItems = result.news || [];
+        
+        for (const item of newsItems) {
+          allArticles.push({
+            headline: item.title,
+            summary: item.title,
+            source: 'Yahoo Search',
+            url: item.link,
+            scraped_at: new Date()
+          });
+          headlines.push(item.title);
+        }
+      }
+    } catch (error) {
+      logger.error(`[NewsIntelAgent] Yahoo Search scrape failed:`, { error });
     }
 
     // Deduplicate and store
     const uniqueArticles = await this.deduplicateAndStore(allArticles);
     
-    console.log(`[NewsIntelAgent] Scrape complete. Found ${uniqueArticles.length} unique articles.`);
+    logger.info(`[NewsIntelAgent] Scrape complete. Found ${uniqueArticles.length} unique articles.`);
     
     return {
-      correlation_id: '', // Will be set by publish
+      correlation_id: uuidv4(),
       timestamp: new Date(),
       headlines: uniqueArticles.map(a => a.headline),
       source: 'Broad'

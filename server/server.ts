@@ -12,14 +12,17 @@ import { eventBus } from "./core/EventBus";
 import { logger } from "./core/Logger";
 import { config } from "./core/Config";
 import { query } from "./db/postgres";
+import { notificationQueue } from "./services/notificationQueue";
 
-// V4 Agents — imported to register their event listeners
-import "./agents/pipeline/NewsIntelAgent";
-import "./agents/pipeline/SocialIntelAgent";
+import { newsIntelAgent } from "./agents/pipeline/NewsIntelAgent";
+import { socialIntelAgent } from "./agents/pipeline/SocialIntelAgent";
+import { etfIntelAgent } from "./agents/pipeline/EtfIntelAgent";
+import { etfReportAgent } from "./agents/pipeline/EtfReportAgent";
 import "./agents/pipeline/EventAnalystAgent";
 import "./agents/pipeline/StrategyAgent";
 import "./agents/pipeline/ExecutionAgent";
 import "./agents/pipeline/AuditAgent";
+import "./agents/pipeline/IntelligenceReportAgent";
 import "./agents/pipeline/ReportAgent";
 
 const app = express();
@@ -182,6 +185,18 @@ app.get("/api/trading/history", requireKey, async (_req: Request, res: Response)
   res.json(await tradeStore.getTradeHistory());
 });
 
+// ─── Notifications ───────────────────────────────────────────────────────────
+
+app.get("/api/notifications/pending", (_req: Request, res: Response) => {
+  res.json(notificationQueue.getPending());
+});
+
+app.post("/api/notifications/mark-sent", (req: Request, res: Response) => {
+  const { id } = req.body;
+  notificationQueue.markAsSent(id);
+  res.json({ success: true });
+});
+
 // ─── Prediction (ad-hoc analysis) ────────────────────────────────────────────
 
 app.post("/api/predict", requireKey, async (req: Request, res: Response) => {
@@ -214,6 +229,64 @@ app.post("/api/system/reboot/:service", requireKey, async (req: Request, res: Re
     res.json({ success: true, service });
   } catch (e: any) {
     res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post("/api/system/force-scrape", requireKey, async (_req: Request, res: Response) => {
+  try {
+    logger.info("[API] Manual force-scrape triggered");
+    const newsBatch = await newsIntelAgent.scrapeBroadNews();
+    const socialBatch = await socialIntelAgent.scrapeSocialIntel();
+
+    eventBus.publish('intel:news_batch', newsBatch);
+    eventBus.publish('intel:social_batch', { items: socialBatch });
+
+    res.json({ success: true, message: "Scrape triggered across all agents" });
+  } catch (e: any) {
+    logger.error("[API] Force-scrape failed:", { error: e.message });
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/system/clear-trades", requireKey, async (req: Request, res: Response) => {
+  try {
+    if (req.query.confirm !== 'true') {
+      return res.status(400).json({ 
+        error: 'Confirmation required', 
+        message: 'Add ?confirm=true to the URL to permanently delete all positions and proposals.' 
+      });
+    }
+    
+    logger.warn("[API] Manual database cleanup triggered (clearing positions and proposals)");
+    await query('TRUNCATE positions, trade_proposals RESTART IDENTITY CASCADE');
+    res.json({ success: true, message: "Database cleared successfully" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── ETF Module Endpoints ───────────────────────────────────────────────────
+
+app.post("/api/etf/scan", requireKey, async (_req: Request, res: Response) => {
+  try {
+    logger.info("[API] Manual ETF scan triggered");
+    await etfIntelAgent.runAnalysis();
+    res.json({ success: true, message: "ETF scan completed" });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/etf/signals", requireKey, async (_req: Request, res: Response) => {
+  try {
+    const results = await query(`
+      SELECT * FROM etf_signals 
+      ORDER BY created_at DESC 
+      LIMIT 50
+    `);
+    res.json(results.rows);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
   }
 });
 

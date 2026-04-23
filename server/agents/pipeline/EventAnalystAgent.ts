@@ -2,6 +2,7 @@ import { eventBus } from '../../core/EventBus';
 import { query } from '../../db/postgres';
 import { ollamaService } from '../../services/ollamaService';
 import { NewsIntelBatch } from './NewsIntelAgent';
+import { logger } from '../../core/Logger';
 
 export interface Opportunity {
   symbol: string;
@@ -13,7 +14,7 @@ export interface Opportunity {
 }
 
 export class EventAnalystAgent {
-  private minConfidence = 0.5;
+  private minConfidence = 0.3;
 
   constructor() {
     this.setupListeners();
@@ -37,14 +38,14 @@ export class EventAnalystAgent {
   public async analyzeEvents(headlines: string[], type: 'NEWS' | 'SOCIAL'): Promise<void> {
     if (headlines.length === 0) return;
 
-    console.log(`[EventAnalystAgent] Analyzing ${headlines.length} ${type} events...`);
+    logger.info(`[EventAnalystAgent] Analyzing ${headlines.length} ${type} events...`);
 
     try {
       // Step 1: Use Ollama to discover and evaluate stocks
       const discoveries = await this.discoverOpportunities(headlines);
       
       if (discoveries.length === 0) {
-        console.log('[EventAnalystAgent] No clear opportunities discovered in this batch.');
+        logger.info('[EventAnalystAgent] No clear opportunities discovered in this batch.');
         return;
       }
 
@@ -55,11 +56,11 @@ export class EventAnalystAgent {
         .slice(0, 3);
 
       if (qualified.length === 0) {
-        console.log('[EventAnalystAgent] No opportunities met the confidence threshold (0.5).');
+        logger.info('[EventAnalystAgent] No opportunities met the confidence threshold.');
         return;
       }
 
-      console.log(`[EventAnalystAgent] Qualified ${qualified.length} top opportunities.`);
+      logger.info(`[EventAnalystAgent] Qualified ${qualified.length} top opportunities.`);
 
       // Step 3: Manage dynamic watchlist (active_focus table)
       for (const opt of qualified) {
@@ -74,7 +75,7 @@ export class EventAnalystAgent {
       });
 
     } catch (error) {
-      console.error('[EventAnalystAgent] Analysis failed:', error);
+      logger.error('[EventAnalystAgent] Analysis failed:', { error });
     }
   }
 
@@ -93,6 +94,8 @@ export class EventAnalystAgent {
         
         Headlines:
         ${batch.map((h, idx) => `${idx + 1}. ${h}`).join('\n')}
+        
+        BE AGGRESSIVE: Identify potential stocks even if the connection is indirect (e.g., "AI news" -> NVDA/MSFT, "Oil prices" -> XOM). We want to capture all plausible market moving events.
         
         For each affected stock, provide:
         - symbol (Ticker e.g. AAPL, 0700.HK)
@@ -123,7 +126,7 @@ export class EventAnalystAgent {
           allDiscoveries.push(...response);
         }
       } catch (error) {
-        console.error('[EventAnalystAgent] Ollama discovery failed for batch:', error);
+        logger.error('[EventAnalystAgent] Ollama discovery failed for batch:', { error });
       }
     }
 
@@ -147,7 +150,7 @@ export class EventAnalystAgent {
         opt.impact_score
       ]);
     } catch (error) {
-      console.error(`[EventAnalystAgent] Error storing ${opt.symbol}:`, error);
+      logger.error(`[EventAnalystAgent] Error storing ${opt.symbol}:`, { error });
     }
   }
 }

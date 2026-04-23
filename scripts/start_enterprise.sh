@@ -8,8 +8,9 @@ export PATH="/Users/admin/.nvm/versions/node/v24.11.1/bin:$PATH"
 
 # 0. Clean up existing processes on 3000 and 3001 to prevent EADDRINUSE
 echo "🧹 Cleaning up existing port processes (3000, 3001)..."
-lsof -ti:3000,3001 | xargs kill -9 > /dev/null 2>&1
-sleep 3
+bash scripts/kill_port.sh 3000
+bash scripts/kill_port.sh 3001
+sleep 2
 
 # 1. Startup Postgres (via Brew if exists)
 if [ -f "/opt/homebrew/bin/brew" ]; then

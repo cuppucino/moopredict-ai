@@ -5,6 +5,7 @@ import { futu_service } from '../../services/futuService';
 import { sendTelegramMessage } from '../../services/telegramService';
 import { Opportunity } from './EventAnalystAgent';
 import { v4 as uuidv4 } from 'uuid';
+import { logger } from '../../core/Logger';
 
 export class StrategyAgent {
   private maxPositionsPerMarket = 3;
@@ -25,22 +26,30 @@ export class StrategyAgent {
    * Processes opportunities from Team B to create full trade plans
    */
   public async processOpportunities(opportunities: Opportunity[], source: string): Promise<void> {
-    console.log(`[StrategyAgent] Processing ${opportunities.length} opportunities from ${source}...`);
+    logger.info(`[StrategyAgent] Processing ${opportunities.length} opportunities from ${source}...`);
 
     for (const opt of opportunities) {
       try {
         // 1. Check current position count limits
         if (!await this.canOpenMorePositions(opt.symbol)) {
-          console.log(`[StrategyAgent] Limit reached for ${opt.symbol}. Skipping.`);
+          logger.info(`[StrategyAgent] Limit reached for ${opt.symbol}. Skipping.`);
           continue;
         }
 
         // 2. Fetch price and technical data
         const stockData = await futu_service.get_stock_data(opt.symbol);
-        if (!stockData) {
-          console.error(`[StrategyAgent] Could not fetch data for ${opt.symbol}`);
+        if (!stockData || stockData.price <= 0) {
+          logger.error(`[StrategyAgent] Invalid market data for ${opt.symbol}`, { price: stockData?.price });
           continue;
         }
+
+        // Safety check for mocked test data (exactly 100.00 is a frequent fallback artifact)
+        if (stockData.price === 100.00) {
+          logger.error(`[StrategyAgent] REJECTED: Mocked price (100.00) detected for ${opt.symbol}. Discarding opportunity.`);
+          continue;
+        }
+
+        logger.info(`[StrategyAgent] Analysis for ${opt.symbol}: Price $${stockData.price} (${stockData.market})`);
 
         // 3. Run Ensemble Analysis
         const prediction = await ensemblePredictor.getPrediction(stockData);
@@ -49,7 +58,7 @@ export class StrategyAgent {
         const combinedConfidence = (prediction.confidence + opt.confidence) / 2;
         
         if (prediction.recommendation === 'HOLD' || combinedConfidence < 0.5) {
-          console.log(`[StrategyAgent] Low confidence/HOLD for ${opt.symbol} (${combinedConfidence.toFixed(2)}). Skipping.`);
+          logger.info(`[StrategyAgent] Low confidence/HOLD for ${opt.symbol} (${combinedConfidence.toFixed(2)}). Skipping.`);
           continue;
         }
 
@@ -83,7 +92,7 @@ export class StrategyAgent {
         });
 
       } catch (error) {
-        console.error(`[StrategyAgent] Error processing ${opt.symbol}:`, error);
+        logger.error(`[StrategyAgent] Error processing ${opt.symbol}:`, { error });
       }
     }
   }

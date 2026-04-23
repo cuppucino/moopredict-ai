@@ -15,6 +15,18 @@ const jsonFormat = winston.format.combine(
   winston.format.json()
 );
 
+// Safe JSON serializer that handles circular references
+const safe_stringify = (obj: unknown): string => {
+  const seen = new WeakSet();
+  return JSON.stringify(obj, (_key, value) => {
+    if (typeof value === 'object' && value !== null) {
+      if (seen.has(value)) return '[Circular]';
+      seen.add(value);
+    }
+    return value;
+  });
+};
+
 // Custom format for console output (pretty-print)
 const consoleFormat = winston.format.combine(
   winston.format.colorize(),
@@ -22,7 +34,7 @@ const consoleFormat = winston.format.combine(
   winston.format.printf(({ timestamp, level, message, agent, correlation_id, ...meta }) => {
     const agentTag = agent ? `[${agent}] ` : '';
     const correlationTag = correlation_id ? `(${correlation_id}) ` : '';
-    const metaStr = Object.keys(meta).length ? ` ${JSON.stringify(meta)}` : '';
+    const metaStr = Object.keys(meta).length ? ` ${safe_stringify(meta)}` : '';
     return `${timestamp} ${level}: ${agentTag}${correlationTag}${message}${metaStr}`;
   })
 );

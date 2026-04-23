@@ -140,6 +140,7 @@ export async function initPostgres(): Promise<void> {
     await client.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_news_articles_url
       ON news_articles(url)
+      WHERE url IS NOT NULL AND url != ''
     `);
 
     // Social mentions table
@@ -477,6 +478,24 @@ export async function initPostgres(): Promise<void> {
       ON CONFLICT (key) DO NOTHING
     `);
     
+    // etf_signals table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS etf_signals (
+        id SERIAL PRIMARY KEY,
+        symbol VARCHAR(20) NOT NULL,
+        signal_type VARCHAR(10) NOT NULL, -- BUY / SELL / WATCH
+        entry_price DECIMAL(12, 4),
+        target_price DECIMAL(12, 4),
+        stop_loss DECIMAL(12, 4),
+        confidence DECIMAL(4, 3),
+        reason TEXT,
+        timeframe VARCHAR(20),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        alerted_at TIMESTAMPTZ,
+        UNIQUE(symbol, signal_type, created_at::DATE)
+      )
+    `);
+
     console.log('[PostgreSQL] Tables initialized successfully');
   } catch (error) {
     console.error('[PostgreSQL] Error initializing tables:', error);

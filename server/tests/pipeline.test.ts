@@ -6,9 +6,14 @@ import { executionAgent } from '../agents/pipeline/ExecutionAgent';
 import { ollamaService } from '../services/ollamaService';
 import { futu_service } from '../services/futuService';
 import { ensemblePredictor } from '../services/ensemblePredictor';
+import { query } from '../db/postgres';
 
 async function testV4Pipeline() {
   console.log("\n🧪 Testing MooPredict V4 Pipeline (Event-First)...");
+
+  // 0. Clean DB state for tests
+  console.log("...Step 0: Clearing previous test data");
+  await query('TRUNCATE positions, trade_proposals RESTART IDENTITY CASCADE');
 
   // 1. Mock Ollama for Discovery
   (ollamaService as any).generateJSON = async (prompt: string) => {
@@ -37,7 +42,7 @@ async function testV4Pipeline() {
   (ensemblePredictor as any).getPrediction = async (_stockData: any) => ({
     recommendation: 'BUY',
     confidence: 0.82,
-    analysis: 'Mocked: Strong bullish signal from AI chip catalyst.',
+    analysis: '[TEST-DATA] Mocked: Strong bullish signal from AI chip catalyst.',
     technicalIndicators: { rsi: 45, atr: 2.0, macd: 'Bullish', movingAverage: 'Above SMA20' },
     all_results: {}
   });

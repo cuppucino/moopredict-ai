@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch server/server.ts",
-    "enterprise": "tsx server/server.ts",
+    "preenterprise": "bash scripts/kill_port.sh 3001",
+    "enterprise": "bash scripts/start_stack.sh",
     "test": "tsx server/tests/pipeline.test.ts"
   },
   "dependencies": {
@@ -25,6 +26,7 @@
     "technicalindicators": "^3.1.0",
     "uuid": "^9.0.1",
     "winston": "^3.11.0",
+    "ws": "^8.20.0",
     "yahoo-finance2": "^2.11.3",
     "zod": "^3.22.4"
   },

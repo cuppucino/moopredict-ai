@@ -4,6 +4,8 @@ import { tradeStore } from '../../services/tradeStore';
 import { sendTelegramMessage } from '../../services/telegramService';
 import { marketHoursService } from '../../services/marketHoursService';
 import { futu_service } from '../../services/futuService';
+import { logger } from '../../core/Logger';
+import { ETF_WATCHLIST } from '../../core/EtfWatchlist';
 
 export class ExecutionAgent {
   constructor() {
@@ -29,9 +31,13 @@ export class ExecutionAgent {
     const isHK = symbol.endsWith('.HK') || /^\d+$/.test(symbol);
     const currency = isHK ? 'HKD' : 'USD';
 
-    console.log(`[ExecutionAgent] Executing ${action} for ${symbol} (Paper Mode)...`);
-
     try {
+      // 0. Final Sanity Check
+      if (entry_price <= 0 || entry_price === 100.00) {
+        logger.error(`[ExecutionAgent] ABORTED: Invalid price $${entry_price} for ${symbol}.`);
+        return;
+      }
+
       // 1. Check virtual balance
       const balanceResult = await query(`
         SELECT current_balance FROM virtual_portfolio WHERE currency = $1
@@ -43,7 +49,7 @@ export class ExecutionAgent {
       const qty = Math.floor(tradeValue / entry_price);
 
       if (qty <= 0) {
-        console.log(`[ExecutionAgent] Insufficient virtual balance for ${symbol}. Skipping.`);
+        logger.info(`[ExecutionAgent] Insufficient virtual balance for ${symbol}. Skipping.`);
         return;
       }
 
@@ -76,7 +82,7 @@ export class ExecutionAgent {
           WHERE symbol = $1 AND status = 'PENDING'
         `, [symbol.toUpperCase()]);
         
-        console.log(`[ExecutionAgent] Paper BUY executed: ${qty} ${symbol} at $${entry_price}`);
+        logger.info(`[ExecutionAgent] Paper BUY executed: ${qty} ${symbol} at $${entry_price}`);
       }
 
       // 4. Notify Telegram
@@ -103,7 +109,7 @@ Value: ${currency} ${totalCost.toFixed(2)}
       });
 
     } catch (error) {
-      console.error(`[ExecutionAgent] Execution failed for ${symbol}:`, error);
+      logger.error(`[ExecutionAgent] Execution failed for ${symbol}:`, { error });
     }
   }
 
@@ -129,14 +135,16 @@ Value: ${currency} ${totalCost.toFixed(2)}
         const currentPrice = stockData.price;
         const pnlPct = ((currentPrice - pos.entry_price) / pos.entry_price) * 100;
 
+        const isEtf = ETF_WATCHLIST.some(e => e.symbol === pos.symbol);
         let shouldExit = false;
         let reason = '';
+        let isTargetHit = false;
 
         if (currentPrice >= proposal.best_target) {
-          shouldExit = true;
+          isTargetHit = true;
           reason = '🥇 BEST TARGET HIT';
         } else if (currentPrice >= proposal.safe_target) {
-          shouldExit = true;
+          isTargetHit = true;
           reason = '🥈 SAFE TARGET HIT';
         } else if (currentPrice <= proposal.stop_loss) {
           shouldExit = true;
@@ -145,9 +153,18 @@ Value: ${currency} ${totalCost.toFixed(2)}
 
         if (shouldExit) {
           await this.closePosition(pos, currentPrice, reason);
+        } else if (isTargetHit) {
+          if (isEtf) {
+            // For ETFs, we just alert on targets to let user decide on trailing
+            logger.info(`[ExecutionAgent] ${pos.symbol} hit target ${currentPrice}, sending recommendation.`);
+            await sendTelegramMessage(`🎯 *ETF TARGET HIT: ${pos.symbol}*\nPrice: $${currentPrice.toFixed(2)}\nAction: Recommended to take profit or set trailing stop.`, 'info');
+          } else {
+            // For regular stocks, keep existing auto-close behavior
+            await this.closePosition(pos, currentPrice, reason);
+          }
         }
       } catch (err) {
-        console.error(`[ExecutionAgent] Error monitoring ${pos.symbol}:`, err);
+        logger.error(`[ExecutionAgent] Error monitoring ${pos.symbol}:`, { error: err });
       }
     }
   }
@@ -158,7 +175,7 @@ Value: ${currency} ${totalCost.toFixed(2)}
     const proceeds = pos.qty * exitPrice;
     const pnl = proceeds - (pos.qty * pos.entry_price);
 
-    console.log(`[ExecutionAgent] Closing ${pos.symbol} at $${exitPrice} (${reason})`);
+    logger.info(`[ExecutionAgent] Closing ${pos.symbol} at $${exitPrice} (${reason})`);
 
     // Update virtual balance
     await query(`

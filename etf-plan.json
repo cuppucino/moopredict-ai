@@ -1,0 +1,372 @@
+{
+  "project": "MooPredict ETF Intelligence Module",
+  "description": "Extend MooPredict to track ETFs using technical analysis and deliver actionable buy/sell/watch signals via Telegram. No manual research needed — the system tells you what to do.",
+  "target_etfs": {
+    "energy": ["XLE", "VDE"],
+    "broad_market": ["SPY", "QQQ", "VTI"],
+    "notes": "Start with these 5. Add more later once signals are stable."
+  },
+  "phases": [
+    {
+      "phase": 0,
+      "name": "QA Fixes — Pre-requisite Before Any New Work",
+      "goal": "Fix the bugs identified in the current code review. These must be resolved before building new features on top of unstable foundations.",
+      "estimated_effort": "half a day",
+      "priority": "MUST DO FIRST",
+      "tasks": [
+        {
+          "id": "0.1",
+          "severity": "CRITICAL",
+          "name": "Fix Board Lot Fallback: 1 → 100",
+          "file": "server/services/futuService.ts",
+          "line": 229,
+          "problem": "When Futu cannot fetch the lot size for a stock, the fallback was changed from 100 to 1. HK stocks have minimum lot sizes of 100, 500, or 1000 — trading 1 share will result in failed or invalid orders on the exchange.",
+          "fix": "Change the catch block fallback in get_board_lot() back to return 100, not 1. If the lot size is unknown, 100 is the safest conservative default for HK stocks.",
+          "code_change": "return 1 → return 100 in the catch block of get_board_lot()"
+        },
+        {
+          "id": "0.2",
+          "severity": "CRITICAL",
+          "name": "Fix TCP Connection Race Condition in FutuService",
+          "file": "server/services/futuService.ts",
+          "line": 96,
+          "problem": "After calling this.client.start(), the code does setTimeout(resolve, 500) to 'give the socket a moment'. This is a race condition — if the TCP handshake takes longer than 500ms, InitConnect (cmd 1001) fires on an unready socket and will fail silently or crash.",
+          "fix": "Move the resolve() call inside the socket's 'connect' event callback in FutuTcpClient.start(). The promise should only resolve when the TCP connection is actually established, not after an arbitrary delay.",
+          "files_affected": [
+            "server/services/futuTcpClient.ts — emit a 'ready' event or return a Promise from start()",
+            "server/services/futuService.ts — await the actual connection, not a timeout"
+          ]
+        },
+        {
+          "id": "0.3",
+          "severity": "CRITICAL",
+          "name": "Audit get_board_lot() Callers for Unhandled Throws",
+          "file": "server/services/futuService.ts",
+          "line": 200,
+          "problem": "get_board_lot() now throws an error when FutuOpenD is not connected, instead of returning 100 silently. Any caller that did not previously handle an exception will now crash the surrounding flow.",
+          "fix": "Search all callers of get_board_lot() and ensure they have try/catch or fallback handling. Alternatively, restore the silent fallback behavior and throw only in contexts where the error is meaningful.",
+          "action": "Run: grep -rn 'get_board_lot' server/ to find all call sites"
+        },
+        {
+          "id": "0.4",
+          "severity": "MEDIUM",
+          "name": "Add Confirmation Guard to /api/system/clear-trades",
+          "file": "server/server.ts",
+          "line": 249,
+          "problem": "POST /api/system/clear-trades runs TRUNCATE positions, trade_proposals RESTART IDENTITY CASCADE with no confirmation step. One accidental POST wipes all trade history permanently. There is no soft-delete, no backup, no recovery.",
+          "fix": "Require a ?confirm=true query parameter before executing the TRUNCATE. If the param is missing, return a 400 with a warning message explaining what will be deleted. Example: if (!req.query.confirm) return res.status(400).json({ error: 'Add ?confirm=true to proceed. This will permanently delete all positions and proposals.' })"
+        },
+        {
+          "id": "0.5",
+          "severity": "MEDIUM",
+          "name": "Re-evaluate minConfidence Drop from 0.5 to 0.3",
+          "file": "server/agents/pipeline/EventAnalystAgent.ts",
+          "line": 17,
+          "problem": "minConfidence was lowered from 0.5 to 0.3 AND the Ollama prompt was changed to 'BE AGGRESSIVE'. Combined, these changes mean significantly more low-quality opportunities will pass through to StrategyAgent and potentially trigger paper trades. Expect more noise and false positives.",
+          "fix": "Monitor the number of signals generated per session in paper mode. If more than 5-10 opportunities are being generated per scrape cycle, the threshold is too low. Recommended: keep minConfidence at 0.4 as a middle ground. Revert to 0.5 if signal quality is poor after 1 week of paper trading.",
+          "action": "Do not change code yet — monitor for 3-5 days of paper trading, then decide"
+        },
+        {
+          "id": "0.6",
+          "severity": "MEDIUM",
+          "name": "Monitor Ollama Load from Doubled Scheduler Frequency",
+          "file": "server/services/scheduler.ts",
+          "line": 12,
+          "problem": "Scrape schedule changed from every 2 hours to every 1 hour. Two additional opening-bell triggers were added (09:15 and 21:15). Total scrape frequency is roughly 3-4x higher than before. Each scrape cycle sends multiple batches to Ollama for analysis, which is CPU-heavy on local hardware.",
+          "fix": "No immediate code change. Monitor Ollama response times and system CPU during market hours. If Ollama starts timing out or queue backs up, revert to 0 */2 * * 1-5 (every 2 hours) and remove one of the opening bell triggers.",
+          "action": "Check logs after first full trading day — look for 'Ollama discovery failed' errors"
+        }
+      ]
+    },
+    {
+      "phase": 1,
+      "name": "ETF Watchlist & Data Foundation",
+      "goal": "Teach the system what ETFs to track and pull their price data reliably.",
+      "estimated_effort": "1-2 days",
+      "tasks": [
+        {
+          "id": "1.1",
+          "name": "Create ETF Watchlist Config",
+          "description": "Add a static config file listing the ETFs to monitor, their sector, and their swing trading timeframe (short: 10-20 days, long: 50+ days). This is the source of truth for what the system watches.",
+          "file": "server/core/EtfWatchlist.ts",
+          "details": [
+            "Define ETF entries with: symbol, name, sector, market (US/HK), timeframe preference",
+            "Include context for each ETF (e.g. XLE is oil-sensitive, QQQ is tech-sensitive)",
+            "Export as a typed array so all agents can reference it"
+          ]
+        },
+        {
+          "id": "1.2",
+          "name": "ETF Price Data Fetcher",
+          "description": "Use yahoo-finance2 (already installed) to fetch OHLCV (Open/High/Low/Close/Volume) data for each ETF. Fetch daily candles for the past 90 days to support technical indicator calculations.",
+          "file": "server/services/etfDataService.ts",
+          "details": [
+            "Function: fetchEtfData(symbol: string): returns 90-day OHLCV array",
+            "Function: fetchEtfSnapshot(symbol: string): returns current price, change %, volume",
+            "Cache results for 15 minutes to avoid rate limiting",
+            "Handle errors gracefully — if one ETF fails, continue with others"
+          ]
+        },
+        {
+          "id": "1.3",
+          "name": "DB Table: etf_signals",
+          "description": "Create a Postgres table to store generated signals so we don't re-alert on the same signal, and can track signal history.",
+          "file": "server/db/postgres.ts",
+          "details": [
+            "Columns: id, symbol, signal_type (BUY/SELL/WATCH), entry_price, target_price, stop_loss, confidence, reason, timeframe, created_at, alerted_at",
+            "Unique constraint on (symbol, signal_type, DATE(created_at)) — one signal per ETF per day per type",
+            "Index on symbol + created_at for fast lookups"
+          ]
+        }
+      ]
+    },
+    {
+      "phase": 2,
+      "name": "Technical Analysis Engine",
+      "goal": "Calculate the key technical indicators that generate buy/sell signals for ETFs.",
+      "estimated_effort": "2-3 days",
+      "notes": "The 'technicalindicators' npm package is already installed — use it.",
+      "tasks": [
+        {
+          "id": "2.1",
+          "name": "RSI (Relative Strength Index)",
+          "description": "RSI measures if an ETF is overbought or oversold on a 0-100 scale. This is the single most useful indicator for swing trading entry/exit points.",
+          "file": "server/services/etfTechnicalAnalysis.ts",
+          "signal_rules": {
+            "BUY_SIGNAL": "RSI drops below 30 (oversold) — ETF is likely to bounce up",
+            "SELL_SIGNAL": "RSI rises above 70 (overbought) — ETF is likely to pull back",
+            "WATCH_SIGNAL": "RSI between 40-60 — neutral, no clear signal yet"
+          },
+          "implementation": "Use 14-period RSI (standard). Input: array of closing prices."
+        },
+        {
+          "id": "2.2",
+          "name": "MACD (Moving Average Convergence Divergence)",
+          "description": "MACD detects momentum shifts and trend changes. A crossover (MACD line crossing signal line) is a classic swing trade entry trigger.",
+          "file": "server/services/etfTechnicalAnalysis.ts",
+          "signal_rules": {
+            "BUY_SIGNAL": "MACD line crosses ABOVE signal line (bullish crossover)",
+            "SELL_SIGNAL": "MACD line crosses BELOW signal line (bearish crossover)",
+            "STRENGTH": "The larger the histogram bar, the stronger the momentum"
+          },
+          "implementation": "Standard settings: fast=12, slow=26, signal=9."
+        },
+        {
+          "id": "2.3",
+          "name": "Moving Averages (SMA 20 / SMA 50)",
+          "description": "Simple moving averages show trend direction. Price above SMA20 = short-term bullish. SMA20 above SMA50 = medium-term bullish (golden cross setup).",
+          "file": "server/services/etfTechnicalAnalysis.ts",
+          "signal_rules": {
+            "BUY_SIGNAL": "Price crosses above SMA20 AND SMA20 is above SMA50",
+            "SELL_SIGNAL": "Price crosses below SMA20",
+            "GOLDEN_CROSS": "SMA20 crosses above SMA50 — strong medium-term buy signal",
+            "DEATH_CROSS": "SMA20 crosses below SMA50 — strong sell/avoid signal"
+          },
+          "implementation": "Compute SMA20 and SMA50 from closing prices. Compare last 2 candles to detect crossovers."
+        },
+        {
+          "id": "2.4",
+          "name": "Volume Confirmation",
+          "description": "A price move on high volume is more reliable than a move on low volume. Use volume to confirm signals — weak volume = skip the signal.",
+          "file": "server/services/etfTechnicalAnalysis.ts",
+          "signal_rules": {
+            "CONFIRM": "Current volume > 1.5x the 20-day average volume — signal is confirmed",
+            "REJECT": "Current volume < 0.8x average — signal is weak, do not alert"
+          },
+          "implementation": "Compute 20-day average volume. Compare today's volume against it."
+        },
+        {
+          "id": "2.5",
+          "name": "Signal Composer",
+          "description": "Combine all indicators into a single signal decision per ETF. Require at least 2 indicators to agree before generating a BUY or SELL. One indicator alone is not enough.",
+          "file": "server/services/etfTechnicalAnalysis.ts",
+          "scoring": {
+            "each_indicator_vote": "+1 for BUY or +1 for SELL",
+            "BUY_threshold": "2+ indicators vote BUY = generate BUY signal",
+            "SELL_threshold": "2+ indicators vote SELL = generate SELL signal",
+            "WATCH_threshold": "Mixed or 1 indicator only = generate WATCH signal",
+            "confidence": "votes / total_indicators (e.g. 3/4 = 75% confidence)"
+          }
+        },
+        {
+          "id": "2.6",
+          "name": "Entry Price, Target & Stop Loss Calculator",
+          "description": "For each BUY signal, automatically calculate where to enter, what the target price is, and where to cut losses. This gives the user a complete trade plan.",
+          "file": "server/services/etfTechnicalAnalysis.ts",
+          "formulas": {
+            "entry_price": "Current market price at signal time",
+            "stop_loss": "Entry price minus 1x ATR (Average True Range, 14-period) — automatic risk limit",
+            "short_term_target": "Entry price plus 2x ATR — for 10-20 day holds",
+            "long_term_target": "Entry price plus 4x ATR — for 50+ day holds",
+            "risk_reward_ratio": "Must be at least 2:1 to generate a signal (don't risk $1 to make $1)"
+          }
+        }
+      ]
+    },
+    {
+      "phase": 3,
+      "name": "ETF Intel Agent",
+      "goal": "Build the agent that runs the analysis pipeline and persists signals to the DB.",
+      "estimated_effort": "1-2 days",
+      "tasks": [
+        {
+          "id": "3.1",
+          "name": "EtfIntelAgent",
+          "description": "New agent that loops through the ETF watchlist, fetches data, runs technical analysis, and stores new signals in the DB. Designed to run on a schedule.",
+          "file": "server/agents/pipeline/EtfIntelAgent.ts",
+          "details": [
+            "Method: runAnalysis() — iterates all ETFs in watchlist",
+            "For each ETF: fetch price data → run technical analysis → compose signal",
+            "Before saving: check DB to see if same signal was already alerted today (dedup)",
+            "If new signal: save to etf_signals table → emit event 'etf:signal_ready'",
+            "Log all analysis results even if no signal is generated (for debugging)"
+          ]
+        },
+        {
+          "id": "3.2",
+          "name": "Wire EtfIntelAgent into Scheduler",
+          "description": "Add EtfIntelAgent to the existing Scheduler so it runs automatically during US and HK market hours.",
+          "file": "server/services/scheduler.ts",
+          "schedule": {
+            "pre_market_scan": "0 8 * * 1-5 — 8am HKT, before HK opens. Morning briefing.",
+            "us_pre_market_scan": "0 20 * * 1-5 — 8pm HKT, before US opens. Evening briefing.",
+            "intraday_scan": "0 10,14 * * 1-5 — Mid-session checks for new signals during HK hours",
+            "us_intraday_scan": "0 22,1 * * 1-5 — Mid-session checks during US hours"
+          }
+        },
+        {
+          "id": "3.3",
+          "name": "Wire into server.ts",
+          "description": "Import EtfIntelAgent in server.ts so its event listeners register on startup. Add force-scan API endpoint for manual triggering.",
+          "file": "server/server.ts",
+          "endpoints": [
+            "POST /api/etf/scan — manually trigger a full ETF scan (useful for testing)",
+            "GET /api/etf/signals — return all signals from the last 7 days"
+          ]
+        }
+      ]
+    },
+    {
+      "phase": 4,
+      "name": "Telegram Signal Delivery",
+      "goal": "Format and send clear, actionable Telegram messages — no jargon, just what to do.",
+      "estimated_effort": "1 day",
+      "tasks": [
+        {
+          "id": "4.1",
+          "name": "ETF Signal Formatter",
+          "description": "Format each signal into a clean Telegram message. Beginner-friendly language. No charts, just numbers and clear instructions.",
+          "file": "server/agents/pipeline/EtfReportAgent.ts",
+          "message_templates": {
+            "BUY_signal": "📈 *ETF BUY SIGNAL: {symbol}*\n━━━━━━━━━━━━━━━━━\n💰 *Entry Price:* ${entry_price}\n🎯 *Target (short):* ${short_term_target} (+{short_pct}%)\n🎯 *Target (long):* ${long_term_target} (+{long_pct}%)\n🛑 *Stop Loss:* ${stop_loss} (-{stop_pct}%)\n📊 *Confidence:* {confidence}%\n⏱ *Hold:* {timeframe}\n\n📝 *Why:* {reason}\n\n_Risk/Reward: {rr_ratio}:1_",
+            "SELL_signal": "📉 *ETF SELL SIGNAL: {symbol}*\n━━━━━━━━━━━━━━━━━\n⚠️ Consider exiting your position.\n💰 *Current Price:* ${current_price}\n📝 *Why:* {reason}\n📊 *Confidence:* {confidence}%",
+            "WATCH_signal": "👀 *ETF WATCH: {symbol}*\n━━━━━━━━━━━━━━━━━\nNot ready to buy yet — keep an eye on this.\n📝 *Why watching:* {reason}\n🔔 Will alert when signal confirms.",
+            "morning_briefing": "🌅 *ETF MORNING BRIEFING*\n━━━━━━━━━━━━━━━━━\n{list_of_signals_today}\n\n_No action needed unless you see a BUY or SELL above._"
+          }
+        },
+        {
+          "id": "4.2",
+          "name": "EtfReportAgent — Event Listener",
+          "description": "Subscribe to 'etf:signal_ready' events and send the formatted Telegram message. Mark signal as alerted in DB after sending.",
+          "file": "server/agents/pipeline/EtfReportAgent.ts",
+          "details": [
+            "Subscribe to 'etf:signal_ready' on eventBus",
+            "Format message based on signal type (BUY/SELL/WATCH)",
+            "Send via existing sendTelegramMessage()",
+            "After successful send: UPDATE etf_signals SET alerted_at = NOW() WHERE id = signal.id",
+            "If Telegram fails: log error, mark signal for retry (do not duplicate)"
+          ]
+        },
+        {
+          "id": "4.3",
+          "name": "Daily Morning Briefing",
+          "description": "Every trading day morning, send a summary of all active ETF signals and positions — even if nothing changed. User always knows the current state.",
+          "file": "server/services/scheduler.ts",
+          "details": [
+            "Query etf_signals for all active BUY signals from last 7 days",
+            "Query positions for any open ETF trades",
+            "Format into one clean morning summary message",
+            "Send at 08:30 HKT for HK session, 20:30 HKT for US session"
+          ]
+        }
+      ]
+    },
+    {
+      "phase": 5,
+      "name": "Paper Trading Integration",
+      "goal": "When a BUY signal fires, automatically simulate the trade in paper mode so you can track performance without real money.",
+      "estimated_effort": "1 day",
+      "notes": "Uses the existing ExecutionAgent and virtual_portfolio table — minimal new code needed.",
+      "tasks": [
+        {
+          "id": "5.1",
+          "name": "Connect ETF Signals to ExecutionAgent",
+          "description": "When EtfIntelAgent emits a BUY signal with confidence above 70%, automatically pass it to ExecutionAgent for paper trade execution.",
+          "file": "server/agents/pipeline/EtfIntelAgent.ts",
+          "details": [
+            "Only auto-execute signals with confidence >= 0.70",
+            "Emit 'strategy:execute_trade' event with symbol, entry_price, stop_loss, target",
+            "ExecutionAgent handles the virtual balance deduction and DB write",
+            "SELL signals: trigger ExecutionAgent to close the matching open position"
+          ]
+        },
+        {
+          "id": "5.2",
+          "name": "ETF Position Monitor",
+          "description": "Extend ExecutionAgent's existing monitorPositions() to handle ETF-specific exit logic using the calculated stop_loss and target_price from the signal.",
+          "file": "server/agents/pipeline/ExecutionAgent.ts",
+          "details": [
+            "For ETF positions: read stop_loss and target from etf_signals table",
+            "If current price hits stop_loss: auto-close and send Telegram SELL alert",
+            "If current price hits target: send Telegram alert recommending exit (do not auto-close — let user decide)",
+            "Daily P&L summary for all open ETF positions"
+          ]
+        }
+      ]
+    },
+    {
+      "phase": 6,
+      "name": "Backtesting & Signal Tuning",
+      "goal": "Verify the signals would have worked historically before trusting them with real money.",
+      "estimated_effort": "2-3 days",
+      "tasks": [
+        {
+          "id": "6.1",
+          "name": "Historical Backtest Runner",
+          "description": "Fetch 1-2 years of daily OHLCV data for each ETF and replay the technical analysis day-by-day to see how many signals were correct.",
+          "file": "server/tests/etf-backtest.ts",
+          "metrics_to_track": [
+            "Win rate: % of BUY signals that hit target before stop loss",
+            "Average return per winning trade",
+            "Average loss per losing trade",
+            "Risk/reward ratio achieved vs expected",
+            "Best performing indicator combination"
+          ]
+        },
+        {
+          "id": "6.2",
+          "name": "Threshold Tuning",
+          "description": "Based on backtest results, adjust RSI thresholds, MACD settings, and confidence minimums to maximize win rate for ETFs specifically. ETFs behave differently from individual stocks.",
+          "file": "server/services/etfTechnicalAnalysis.ts",
+          "notes": "ETFs revert to mean more reliably than stocks. RSI 35/65 thresholds may work better than classic 30/70 for ETFs with large AUM like SPY and XLE."
+        }
+      ]
+    }
+  ],
+  "recommended_build_order": [
+    "Phase 0 (QA fixes) FIRST — fix bugs before building new features on top",
+    "Phase 1 → Phase 2 → Phase 3 → Phase 4 (get ETF signals flowing to Telegram)",
+    "Phase 5 (paper trading) after signals are validated for a few days",
+    "Phase 6 (backtesting) can run in parallel with Phase 4/5"
+  ],
+  "dependencies": {
+    "already_installed": ["yahoo-finance2", "technicalindicators", "node-cron", "winston", "uuid"],
+    "new_packages_needed": "None — all dependencies already exist in package.json"
+  },
+  "success_criteria": {
+    "phase_1_2_3": "System generates at least one signal per ETF per week when market conditions are active",
+    "phase_4": "Telegram receives a morning briefing every trading day with clear BUY/SELL/WATCH labels",
+    "phase_5": "Paper portfolio tracks ETF trades automatically — P&L visible via /api/etf/signals",
+    "phase_6": "Backtest shows at least 55% win rate with 2:1 risk/reward ratio before considering real money"
+  }
+}

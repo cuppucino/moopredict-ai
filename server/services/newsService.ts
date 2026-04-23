@@ -3,7 +3,6 @@ import { query } from "../db/database";
 import { ollamaService } from "./ollamaService";
 import { macroEventAnalyzer } from "./macroEventAnalyzer";
 import dotenv from "dotenv";
-import yahooFinance from 'yahoo-finance2';
 import { futu_service } from './futuService';
 
 dotenv.config();

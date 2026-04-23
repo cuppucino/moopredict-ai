@@ -6,10 +6,8 @@ import { CircuitBreaker } from "../core/CircuitBreaker";
 
 // createRequire allows loading CJS-only packages from ESM context
 const _require = createRequire(import.meta.url);
-const futuApi = _require("moomoo-api");
 const protoObj = _require("moomoo-api/proto.js");
-
-const ftapi = futuApi.default || futuApi;
+import { FutuTcpClient } from "./futuTcpClient";
 const QotMarket = protoObj.Qot_Common?.nested?.QotMarket?.values || {};
 const KLType = protoObj.Qot_Common?.nested?.KLType?.values || {};
 const RehabType = protoObj.Qot_Common?.nested?.RehabType?.values || {};
@@ -94,27 +92,35 @@ export class FutuService {
         this.client = null;
       }
 
-      this.client = new ftapi();
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("Timeout connecting to FutuOpenD")), 15000);
-        
-        this.client.onlogin = (success: boolean, response: any) => {
-          clearTimeout(timeout);
-          if (success) {
-            this.is_connected = true;
-            this.is_connecting = false;
-            logger.info("[FutuService] Successfully connected to FutuOpenD", { host: config.FUTU_HOST, port: config.FUTU_PORT });
-            resolve();
-          } else {
-            const msg = response?.retMsg || response?.error || "Unknown login error";
-            reject(new Error(`Futu login failed: ${msg}`));
+      this.client = new FutuTcpClient(protoObj);
+      await this.client.start(config.FUTU_HOST, config.FUTU_PORT);
+      
+      // After successful connection, we must send InitConnect (cmd 1001) before any other requests
+      logger.info("[FutuService] Sending InitConnect (1001)...");
+      try {
+        const initRes = await this.client._sendCmd(1001, {
+          c2s: {
+            clientVer: 103,
+            clientID: "moopredict",
+            recvNotify: true,
+            packetEncAlgo: 0,
+            pushProtoFmt: 0,
+            programmingLanguage: "Node.js"
           }
-        };
+        }, "InitConnect");
+        
+        if (initRes.retType === 0) {
+          this.is_connected = true;
+          this.is_connecting = false;
+          logger.info("[FutuService] InitConnect successful");
+        } else {
+          throw new Error(initRes.retMsg || "InitConnect failed");
+        }
+      } catch (err: any) {
+        logger.error("[FutuService] InitConnect failed:", err.message || err);
+        throw err;
+      }
 
-        this.client.start(config.FUTU_HOST, config.FUTU_PORT, false);
-      });
-
-      // After successful connection, discover account ID
       await this.discover_account();
     } catch (error: any) {
       this.is_connected = false;
@@ -187,7 +193,7 @@ export class FutuService {
    */
 
   async get_board_lot(symbol: string): Promise<number> {
-    if (!this.is_connected) return 100;
+    if (!this.is_connected) throw new Error("FutuOpenD not connected");
 
     return this.futuBreaker.execute(async () => {
       try {
@@ -216,8 +222,8 @@ export class FutuService {
         
         return 100; // US stocks and safe default
       } catch (error) {
-        logger.warn(`[FutuService] Could not fetch board lot for ${symbol}, falling back to 100`);
-        return 100;
+        logger.warn(`[FutuService] Could not fetch board lot for ${symbol}. Returning default 100.`);
+        return 100; // Default to 100 shares if lot size unknown
       }
     });
   }
@@ -444,15 +450,51 @@ export class FutuService {
         reqNum = 30;
         break;
     }
+    // Mapping KLType to SubType for subscription
+    const SubType = protoObj.Qot_Common?.nested?.SubType?.values || {};
+    const klToSub: Record<number, number> = {
+      [KLType.KLType_Day]: SubType.SubType_KL_Day,
+      [KLType.KLType_1Min]: SubType.SubType_KL_1Min,
+      [KLType.KLType_5Min]: SubType.SubType_KL_5Min,
+      [KLType.KLType_15Min]: SubType.SubType_KL_15Min,
+      [KLType.KLType_30Min]: SubType.SubType_KL_30Min,
+      [KLType.KLType_60Min]: SubType.SubType_KL_60Min,
+      [KLType.KLType_Week]: SubType.SubType_KL_Week,
+      [KLType.KLType_Month]: SubType.SubType_KL_Month,
+      [KLType.KLType_Year]: SubType.SubType_KL_Year,
+    };
 
-    const kl_res: any = await this.client.GetKL({ 
-      c2s: { 
-        security, 
-        rehabType: RehabType.RehabType_Forward, 
-        klType, 
-        reqNum 
+    const subType = klToSub[klType];
+    if (subType) {
+      try {
+        await this.client.Sub({
+          c2s: {
+            securityList: [security],
+            subTypeList: [subType],
+            isSubOrUnSub: true,
+            isRegOrUnRegPush: true
+          }
+        });
+      } catch (err: any) {
+        logger.warn(`[FutuService] Subscription failed for ${symbol} (type ${subType}): ${err?.retMsg || JSON.stringify(err)}`);
+        // We continue anyway, maybe it works or we just use snapshot
       }
-    });
+    }
+
+    let kl_res: any;
+    try {
+      kl_res = await this.client.GetKL({ 
+        c2s: { 
+          security, 
+          rehabType: RehabType.RehabType_Forward, 
+          klType, 
+          reqNum 
+        }
+      });
+    } catch (error: any) {
+      const msg = error?.retMsg || error?.error || JSON.stringify(error);
+      throw new Error(`Futu GetKL failed: ${msg}`);
+    }
 
     const klList = kl_res.s2c?.klList || [];
     console.log(`[FutuService] Received ${klList.length} points from Futu for range: ${normalizedRange}`);

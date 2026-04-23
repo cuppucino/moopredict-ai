@@ -1,6 +1,7 @@
 import Parser from 'rss-parser';
 import { query } from '../../db/postgres';
 import axios from 'axios';
+import { logger } from '../../core/Logger';
 
 export class SocialIntelAgent {
   private parser: Parser;
@@ -9,7 +10,8 @@ export class SocialIntelAgent {
   constructor() {
     this.parser = new Parser({
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/rss+xml, application/xml;q=0.9, */*;q=0.8'
       }
     });
   }
@@ -18,13 +20,13 @@ export class SocialIntelAgent {
    * Scrapes broad social intel
    */
   public async scrapeSocialIntel(): Promise<any> {
-    console.log('[SocialIntelAgent] Starting social intel scrape...');
+    logger.info('[SocialIntelAgent] Starting social intel scrape...');
     const allItems: any[] = [];
 
     // 1. Reddit RSS
     for (const sub of this.redditSubs) {
       try {
-        console.log(`[SocialIntelAgent] Scraping r/${sub}...`);
+        logger.info(`[SocialIntelAgent] Scraping r/${sub}...`);
         const url = `https://www.reddit.com/r/${sub}/.rss`;
         const feed = await this.parser.parseURL(url);
         
@@ -37,13 +39,13 @@ export class SocialIntelAgent {
           });
         }
       } catch (error) {
-        console.error(`[SocialIntelAgent] Error scraping r/${sub}:`, error);
+        logger.error(`[SocialIntelAgent] Error scraping r/${sub}:`, { error });
       }
     }
 
     // 2. StockTwits Trending Stream
     try {
-      console.log('[SocialIntelAgent] Scraping StockTwits trending...');
+      logger.info('[SocialIntelAgent] Scraping StockTwits trending...');
       const response = await axios.get('https://api.stocktwits.com/api/2/streams/trending.json', {
         headers: { 'User-Agent': 'MooPredict/1.0' }
       });
@@ -59,12 +61,12 @@ export class SocialIntelAgent {
         }
       }
     } catch (error) {
-      console.error('[SocialIntelAgent] Error scraping StockTwits:', error);
+      logger.error('[SocialIntelAgent] Error scraping StockTwits:', { error });
     }
 
     // Store in DB
     const storedCount = await this.storeIntel(allItems);
-    console.log(`[SocialIntelAgent] Social scrape complete. Stored ${storedCount} items.`);
+    logger.info(`[SocialIntelAgent] Social scrape complete. Stored ${storedCount} items.`);
     
     return allItems;
   }
