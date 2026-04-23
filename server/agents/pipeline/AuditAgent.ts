@@ -61,6 +61,30 @@ export class AuditAgent {
         lesson
       ]);
 
+      // Update ETF Signals if this proposal originated from the ETF Module
+      if (proposal.event_description && proposal.event_description.includes('[ETF Module]')) {
+        const signalResult = await query(`
+          SELECT id, created_at FROM etf_signals 
+          WHERE symbol = $1 AND closed_at IS NULL
+          ORDER BY created_at DESC LIMIT 1
+        `, [symbol]);
+
+        if (signalResult.rows.length > 0) {
+          const signal = signalResult.rows[0];
+          const actualReturn = (pnl / (data.qty * data.entry_price)) * 100;
+          // Calculate days held (rounded up, minimum 0)
+          const daysHeld = Math.max(0, Math.ceil((Date.now() - new Date(signal.created_at).getTime()) / (1000 * 60 * 60 * 24)));
+          
+          await query(`
+            UPDATE etf_signals 
+            SET is_correct = $1, actual_return = $2, days_held = $3, closed_at = NOW()
+            WHERE id = $4
+          `, [wasAccurate, actualReturn, daysHeld, signal.id]);
+          
+          console.log(`[AuditAgent] ETF Signal outcome updated for ${symbol}. Correct: ${wasAccurate}`);
+        }
+      }
+
       console.log(`[AuditAgent] Audit complete for ${symbol}. Accurate: ${wasAccurate}`);
 
     } catch (error) {

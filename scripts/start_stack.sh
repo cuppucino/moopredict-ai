@@ -14,8 +14,13 @@ cleanup_stack() {
 
 trap cleanup_stack SIGINT SIGTERM
 
-# 1. Start Notification Poller
+# 1. Kill any existing poller instances before starting a fresh one
+echo "🧹 Clearing any existing poller processes..."
+pkill -f "notify-poller.mjs" 2>/dev/null && sleep 1 || true
+
+# 2. Start Notification Poller
 echo "📬 Starting Notification Poller..."
+mkdir -p logs
 node scripts/notify-poller.mjs >> logs/poller.log 2>&1 &
 POLLER_PID=$!
 

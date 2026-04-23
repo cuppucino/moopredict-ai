@@ -107,6 +107,7 @@ export class FutuTcpClient {
     this.socket.on('close', () => {
       logger.warn('[FutuTcpClient] Connection closed');
     });
+    }); // closes new Promise
   }
 
   private handlePacket(protoID: number, serialNo: number, body: Buffer) {

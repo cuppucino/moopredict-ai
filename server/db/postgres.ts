@@ -7,9 +7,9 @@ dotenv.config();
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  max: 20, // Maximum number of clients in the pool
-  idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
-  connectionTimeoutMillis: 2000, // Return error after 2 seconds if connection not established
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 8000,
 });
 
 // Log connection status
@@ -483,7 +483,7 @@ export async function initPostgres(): Promise<void> {
       CREATE TABLE IF NOT EXISTS etf_signals (
         id SERIAL PRIMARY KEY,
         symbol VARCHAR(20) NOT NULL,
-        signal_type VARCHAR(10) NOT NULL, -- BUY / SELL / WATCH
+        signal_type VARCHAR(10) NOT NULL,
         entry_price DECIMAL(12, 4),
         target_price DECIMAL(12, 4),
         stop_loss DECIMAL(12, 4),
@@ -492,8 +492,34 @@ export async function initPostgres(): Promise<void> {
         timeframe VARCHAR(20),
         created_at TIMESTAMPTZ DEFAULT NOW(),
         alerted_at TIMESTAMPTZ,
-        UNIQUE(symbol, signal_type, created_at::DATE)
-      )
+        is_correct BOOLEAN,
+        actual_return DECIMAL(8, 4),
+        days_held INTEGER,
+        closed_at TIMESTAMPTZ
+      )`);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_etf_signals_symbol_date
+      ON etf_signals (symbol, created_at DESC)
+    `);
+
+    // Ensure outcome columns exist for etf_signals
+    await client.query(`
+      DO $$ 
+      BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='etf_signals' AND column_name='is_correct') THEN
+          ALTER TABLE etf_signals ADD COLUMN is_correct BOOLEAN;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='etf_signals' AND column_name='actual_return') THEN
+          ALTER TABLE etf_signals ADD COLUMN actual_return DECIMAL(8, 4);
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='etf_signals' AND column_name='days_held') THEN
+          ALTER TABLE etf_signals ADD COLUMN days_held INTEGER;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='etf_signals' AND column_name='closed_at') THEN
+          ALTER TABLE etf_signals ADD COLUMN closed_at TIMESTAMPTZ;
+        END IF;
+      END $$;
     `);
 
     console.log('[PostgreSQL] Tables initialized successfully');

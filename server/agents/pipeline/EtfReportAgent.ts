@@ -30,6 +30,10 @@ export class EtfReportAgent {
       const emoji = isBuy ? '📈' : '📉';
       const typeLabel = isBuy ? 'BUY SIGNAL' : 'SELL SIGNAL';
       
+      const risk = signal.entry_price - signal.stop_loss;
+      const reward = signal.target_price_short - signal.entry_price;
+      const rrRatio = risk > 0 ? (reward / risk).toFixed(1) : 'N/A';
+
       const message = `
 ${emoji} *ETF ${typeLabel}: ${signal.symbol}*
 ━━━━━━━━━━━━━━━━━
@@ -42,7 +46,7 @@ ${emoji} *ETF ${typeLabel}: ${signal.symbol}*
 
 📝 *Why:* ${signal.reason}
 
-_Risk/Reward: 2:1 ratio (ATR-based)_
+_Risk/Reward: ${rrRatio}:1 (ATR-based)_
       `.trim();
 
       await sendTelegramMessage(message, 'info');
@@ -64,12 +68,31 @@ _Risk/Reward: 2:1 ratio (ATR-based)_
    */
   private async sendMorningBriefing(): Promise<void> {
     try {
+      // Get active signals
       const activeSignals = await query(`
         SELECT * FROM etf_signals 
         WHERE created_at > NOW() - INTERVAL '48 hours'
         AND signal_type = 'BUY'
         ORDER BY created_at DESC
       `);
+
+      // Get lifetime stats
+      const statsResult = await query(`
+        SELECT 
+          COUNT(*) as total_resolved,
+          SUM(CASE WHEN is_correct = true THEN 1 ELSE 0 END) as total_wins
+        FROM etf_signals
+        WHERE is_correct IS NOT NULL
+      `);
+      
+      const stats = statsResult.rows[0];
+      const totalResolved = parseInt(stats.total_resolved) || 0;
+      const totalWins = parseInt(stats.total_wins) || 0;
+      const winRate = totalResolved > 0 ? Math.round((totalWins / totalResolved) * 100) : 0;
+      
+      const winRateStr = totalResolved > 0 
+        ? `\n_ETF Module lifetime win rate: ${winRate}% across ${totalResolved} signals._\n`
+        : `\n_ETF Module lifetime win rate: N/A (no closed signals yet)._\n`;
 
       if (activeSignals.rows.length === 0) {
         // Only send if there are active signals to keep noise low
@@ -82,7 +105,7 @@ _Risk/Reward: 2:1 ratio (ATR-based)_
 
       const message = `
 🌅 *ETF MORNING BRIEFING*
-━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━${winRateStr}
 The following ETF signals are currently active:
 
 ${signalList}

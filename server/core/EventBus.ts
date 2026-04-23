@@ -80,10 +80,26 @@ export interface PipelineEvents {
   };
 
   'system:hourly_flush': BaseEvent;
-  
+
   'system:announcement': BaseEvent & {
     message: string;
     level: 'info' | 'important';
+  };
+
+  // ETF Intelligence Module
+  'etf:force_scan': BaseEvent;
+  'etf:morning_briefing': BaseEvent;
+  'etf:signal_ready': BaseEvent & {
+    id: number;
+    symbol: string;
+    signal_type: 'BUY' | 'SELL' | 'WATCH';
+    confidence: number;
+    reason: string;
+    entry_price: number;
+    target_price_short: number;
+    target_price_long: number;
+    stop_loss: number;
+    timeframe: string;
   };
 }
 

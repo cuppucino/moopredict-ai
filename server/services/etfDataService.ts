@@ -54,7 +54,7 @@ class EtfDataService {
           close: parseFloat(q.close.toFixed(2)),
           volume: q.volume || 0,
         }))
-        .sort((a, b) => a.date.localeCompare(b.date));
+        .sort((a: EtfOhlcv, b: EtfOhlcv) => a.date.localeCompare(b.date));
 
       this.cache.set(cacheKey, { data: history, timestamp: Date.now() });
       return history;

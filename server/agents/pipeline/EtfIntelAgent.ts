@@ -36,13 +36,8 @@ export class EtfIntelAgent {
         const signal = etf_technical_analysis.analyze(etf.symbol, history);
         logger.info(`[EtfIntelAgent] Analysis result for ${etf.symbol}: ${signal.signal_type} (Conf: ${Math.round(signal.confidence * 100)}%)`);
 
-        // 3. Persist and Emit if signal is valid
-        if (signal.signal_type !== 'WATCH') {
-          await this.saveAndEmitSignal(signal, etf.preferred_timeframe);
-        } else {
-          // Optional: Log watch signals to DB with low confidence for historical tracking
-          logger.debug(`[EtfIntelAgent] Neutral stance on ${etf.symbol}.`);
-        }
+        // 3. Persist (Always save for tracking, emit filters inside)
+        await this.saveAndEmitSignal(signal, etf.preferred_timeframe);
 
       } catch (error: any) {
         logger.error(`[EtfIntelAgent] Failed to analyze ${etf.symbol}:`, error.message);
@@ -84,13 +79,15 @@ export class EtfIntelAgent {
       ]);
 
       const signalId = result.rows[0].id;
+      logger.info(`[EtfIntelAgent] New ${signal.signal_type} signal persisted for ${signal.symbol} (ID: ${signalId})`);
 
-      // 3. Emit for ReportAgent
-      eventBus.publish('etf:signal_ready', {
-        id: signalId,
-        ...signal,
-        timeframe
-      });
+      // 3. Emit for ReportAgent (Only BUY/SELL)
+      if (signal.signal_type !== 'WATCH') {
+        eventBus.publish('etf:signal_ready', {
+          id: signalId,
+          ...signal,
+          timeframe
+        });
 
       // 4. Auto-execute in Paper Mode if confidence is high (>= 70%)
       if (signal.signal_type === 'BUY' && signal.confidence >= 0.7) {
@@ -121,12 +118,15 @@ export class EtfIntelAgent {
           best_target: signal.target_price_long,
           safe_target: signal.target_price_short,
           stop_loss: signal.stop_loss,
+          max_hold_days: 20,
           confidence: signal.confidence,
-          reasoning: `[ETF Module] ${signal.reason}`
+          reasoning: `[ETF Module] ${signal.reason}`,
+          catalyst_id: null
         });
       }
+    }
 
-      logger.info(`[EtfIntelAgent] New ${signal.signal_type} signal persisted for ${signal.symbol} (ID: ${signalId})`);
+      // logger.info(`[EtfIntelAgent] New ${signal.signal_type} signal persisted for ${signal.symbol} (ID: ${signalId})`);
 
     } catch (error: any) {
       logger.error(`[EtfIntelAgent] Error saving signal for ${signal.symbol}:`, error.message);

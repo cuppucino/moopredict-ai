@@ -32,8 +32,11 @@ const API_KEY = process.env.INTERNAL_API_KEY || "REMOVED_PRIVATE_VALUE";
 app.use(helmet());
 app.use(express.json());
 
+const SILENT_ROUTES = ['/api/notifications/pending'];
 app.use((req: Request, _res: Response, next: NextFunction) => {
-  logger.info(`[HTTP] ${req.method} ${req.url}`);
+  if (!SILENT_ROUTES.includes(req.path)) {
+    logger.info(`[HTTP] ${req.method} ${req.url}`);
+  }
   next();
 });
 

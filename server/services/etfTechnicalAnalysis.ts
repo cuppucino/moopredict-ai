@@ -101,7 +101,7 @@ export class EtfTechnicalAnalysis {
     }
 
     // Volume Confirmation (Only for BUY signals)
-    const volumeConfirmed = volumeRatio > 1.1;
+    const volumeConfirmed = volumeRatio > 1.2;
     if (buyVotes >= 2 && !volumeConfirmed) {
       logger.info(`[EtfAnalysis] ${symbol} BUY signal rejected due to low volume ratio: ${volumeRatio.toFixed(2)}`);
       buyVotes = 1; // Demote signal

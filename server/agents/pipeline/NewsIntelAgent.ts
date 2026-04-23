@@ -4,6 +4,7 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 
 import { logger } from '../../core/Logger';
+import { sendTelegramMessage } from '../../services/telegramService';
 import { v4 as uuidv4 } from 'uuid';
 import { createRequire } from "module";
 const _require = createRequire(import.meta.url);
@@ -88,6 +89,10 @@ export class NewsIntelAgent {
     
     logger.info(`[NewsIntelAgent] Scrape complete. Found ${uniqueArticles.length} unique articles.`);
     
+    if (uniqueArticles.length > 0) {
+      await this.sendRecap(uniqueArticles);
+    }
+    
     return {
       correlation_id: uuidv4(),
       timestamp: new Date(),
@@ -127,6 +132,40 @@ export class NewsIntelAgent {
     }
 
     return uniqueArticles;
+  }
+
+  /**
+   * Sends a summary of newly scraped articles to Telegram
+   */
+  private async sendRecap(articles: any[]): Promise<void> {
+    try {
+      const grouped: { [source: string]: string[] } = {};
+      for (const a of articles) {
+        if (!grouped[a.source]) grouped[a.source] = [];
+        grouped[a.source].push(a.headline);
+      }
+
+      let message = `📰 *Hourly News Found:*\n\n`;
+      let count = 1;
+      for (const source in grouped) {
+        message += `${count}. [${source}]\n`;
+        // Limit to 5 headlines per source to avoid Telegram message length limits
+        const headlines = grouped[source].slice(0, 5);
+        for (const headline of headlines) {
+          message += `- ${headline}\n`;
+        }
+        if (grouped[source].length > 5) {
+          message += `- ...and ${grouped[source].length - 5} more\n`;
+        }
+        message += `\n`;
+        count++;
+      }
+
+      await sendTelegramMessage(message.trim(), 'info');
+      logger.info(`[NewsIntelAgent] Sent news recap to Telegram.`);
+    } catch (error) {
+      logger.error(`[NewsIntelAgent] Failed to send news recap:`, error);
+    }
   }
 }
 

@@ -10,71 +10,69 @@
     {
       "phase": 0,
       "name": "QA Fixes — Pre-requisite Before Any New Work",
-      "goal": "Fix the bugs identified in the current code review. These must be resolved before building new features on top of unstable foundations.",
-      "estimated_effort": "half a day",
-      "priority": "MUST DO FIRST",
+      "goal": "Fix the bugs identified in the code review. QA confirmed on 2026-04-23 — 3 of 4 actionable fixes are already done, 2 are monitoring-only.",
+      "estimated_effort": "0 — already resolved",
+      "priority": "DONE — verify statuses below before moving to Phase 1",
       "tasks": [
         {
           "id": "0.1",
           "severity": "CRITICAL",
-          "name": "Fix Board Lot Fallback: 1 → 100",
+          "status": "FIXED",
+          "name": "Board Lot Fallback: 1 vs 100",
           "file": "server/services/futuService.ts",
-          "line": 229,
-          "problem": "When Futu cannot fetch the lot size for a stock, the fallback was changed from 100 to 1. HK stocks have minimum lot sizes of 100, 500, or 1000 — trading 1 share will result in failed or invalid orders on the exchange.",
-          "fix": "Change the catch block fallback in get_board_lot() back to return 100, not 1. If the lot size is unknown, 100 is the safest conservative default for HK stocks.",
-          "code_change": "return 1 → return 100 in the catch block of get_board_lot()"
+          "line": 226,
+          "problem": "Fallback was changed from 100 to 1 — HK stocks have minimum lot sizes of 100, 500, or 1000, so trading 1 share would result in invalid orders.",
+          "resolution": "Already fixed in current code. Both catch paths return 100 with comment 'Default to 100 shares if lot size unknown'. No further action needed."
         },
         {
           "id": "0.2",
           "severity": "CRITICAL",
-          "name": "Fix TCP Connection Race Condition in FutuService",
-          "file": "server/services/futuService.ts",
-          "line": 96,
-          "problem": "After calling this.client.start(), the code does setTimeout(resolve, 500) to 'give the socket a moment'. This is a race condition — if the TCP handshake takes longer than 500ms, InitConnect (cmd 1001) fires on an unready socket and will fail silently or crash.",
-          "fix": "Move the resolve() call inside the socket's 'connect' event callback in FutuTcpClient.start(). The promise should only resolve when the TCP connection is actually established, not after an arbitrary delay.",
-          "files_affected": [
-            "server/services/futuTcpClient.ts — emit a 'ready' event or return a Promise from start()",
-            "server/services/futuService.ts — await the actual connection, not a timeout"
-          ]
+          "status": "FIXED",
+          "name": "TCP Connection Race Condition in FutuTcpClient",
+          "file": "server/services/futuTcpClient.ts",
+          "line": 54,
+          "problem": "Previous code used setTimeout(resolve, 500) after calling start() — a race condition if the TCP handshake took longer than 500ms, causing InitConnect to fire on an unready socket.",
+          "resolution": "Already fixed. FutuTcpClient.start() now returns a proper Promise<void> that resolves inside socket.once('connect') and rejects inside socket.once('error'). futuService.ts correctly awaits this Promise before sending InitConnect (cmd 1001)."
         },
         {
           "id": "0.3",
           "severity": "CRITICAL",
+          "status": "NOT APPLICABLE",
           "name": "Audit get_board_lot() Callers for Unhandled Throws",
           "file": "server/services/futuService.ts",
-          "line": 200,
-          "problem": "get_board_lot() now throws an error when FutuOpenD is not connected, instead of returning 100 silently. Any caller that did not previously handle an exception will now crash the surrounding flow.",
-          "fix": "Search all callers of get_board_lot() and ensure they have try/catch or fallback handling. Alternatively, restore the silent fallback behavior and throw only in contexts where the error is meaningful.",
-          "action": "Run: grep -rn 'get_board_lot' server/ to find all call sites"
+          "line": 196,
+          "problem": "get_board_lot() throws when FutuOpenD is not connected — callers without try/catch would crash.",
+          "resolution": "Confirmed via grep: get_board_lot() is defined but never called anywhere else in the codebase. No external callers exist. Risk is zero until the method is wired up — add try/catch when first used."
         },
         {
           "id": "0.4",
           "severity": "MEDIUM",
-          "name": "Add Confirmation Guard to /api/system/clear-trades",
+          "status": "FIXED",
+          "name": "Confirmation Guard on /api/system/clear-trades",
           "file": "server/server.ts",
-          "line": 249,
-          "problem": "POST /api/system/clear-trades runs TRUNCATE positions, trade_proposals RESTART IDENTITY CASCADE with no confirmation step. One accidental POST wipes all trade history permanently. There is no soft-delete, no backup, no recovery.",
-          "fix": "Require a ?confirm=true query parameter before executing the TRUNCATE. If the param is missing, return a 400 with a warning message explaining what will be deleted. Example: if (!req.query.confirm) return res.status(400).json({ error: 'Add ?confirm=true to proceed. This will permanently delete all positions and proposals.' })"
+          "line": 253,
+          "problem": "TRUNCATE on positions + trade_proposals with no confirmation — one accidental POST wipes all data permanently.",
+          "resolution": "Already fixed. Endpoint checks req.query.confirm !== 'true' and returns HTTP 400 with a descriptive warning if the param is missing. TRUNCATE only executes with ?confirm=true explicitly in the URL."
         },
         {
           "id": "0.5",
           "severity": "MEDIUM",
-          "name": "Re-evaluate minConfidence Drop from 0.5 to 0.3",
+          "status": "MONITOR",
+          "name": "minConfidence 0.5 to 0.3 with Aggressive Ollama Prompt",
           "file": "server/agents/pipeline/EventAnalystAgent.ts",
           "line": 17,
-          "problem": "minConfidence was lowered from 0.5 to 0.3 AND the Ollama prompt was changed to 'BE AGGRESSIVE'. Combined, these changes mean significantly more low-quality opportunities will pass through to StrategyAgent and potentially trigger paper trades. Expect more noise and false positives.",
-          "fix": "Monitor the number of signals generated per session in paper mode. If more than 5-10 opportunities are being generated per scrape cycle, the threshold is too low. Recommended: keep minConfidence at 0.4 as a middle ground. Revert to 0.5 if signal quality is poor after 1 week of paper trading.",
-          "action": "Do not change code yet — monitor for 3-5 days of paper trading, then decide"
+          "problem": "minConfidence lowered to 0.3 AND Ollama prompt changed to BE AGGRESSIVE — significantly more low-quality signals will pass through to StrategyAgent and trigger paper trades.",
+          "action": "No code change yet. Monitor signals per scrape cycle in paper mode for 3-5 trading days. If more than 5-10 opportunities fire per cycle, raise threshold to 0.4. Revert to 0.5 if signal quality is poor after 1 week."
         },
         {
           "id": "0.6",
           "severity": "MEDIUM",
-          "name": "Monitor Ollama Load from Doubled Scheduler Frequency",
+          "status": "MONITOR",
+          "name": "Scheduler Frequency 2h to 1h Plus Two Extra Opening Bell Triggers",
           "file": "server/services/scheduler.ts",
           "line": 12,
-          "problem": "Scrape schedule changed from every 2 hours to every 1 hour. Two additional opening-bell triggers were added (09:15 and 21:15). Total scrape frequency is roughly 3-4x higher than before. Each scrape cycle sends multiple batches to Ollama for analysis, which is CPU-heavy on local hardware.",
-          "fix": "No immediate code change. Monitor Ollama response times and system CPU during market hours. If Ollama starts timing out or queue backs up, revert to 0 */2 * * 1-5 (every 2 hours) and remove one of the opening bell triggers.",
-          "action": "Check logs after first full trading day — look for 'Ollama discovery failed' errors"
+          "problem": "Scrape frequency is now 3-4x higher. Each cycle hits Ollama heavily — CPU-bound on local hardware.",
+          "action": "No code change yet. After first full trading day check logs for 'Ollama discovery failed' errors. If Ollama times out, revert to 0 */2 * * 1-5 (every 2 hours) and remove one opening bell trigger."
         }
       ]
     },
