@@ -83,6 +83,10 @@ export class EventAnalystAgent {
    * Calls Ollama to map headlines to stocks and score them
    */
   private async discoverOpportunities(headlines: string[]): Promise<Opportunity[]> {
+    // 0. Fetch the user's watchlist to guide the AI
+    const watchlistResult = await query("SELECT symbol FROM user_watchlist");
+    const watchlist = watchlistResult.rows.map(r => r.symbol).join(', ');
+
     // We send headlines in batches to avoid overwhelming the LLM and to provide context
     const batchSize = 15;
     const allDiscoveries: Opportunity[] = [];
@@ -92,18 +96,22 @@ export class EventAnalystAgent {
       const prompt = `
         As a senior stock analyst, analyze these headlines and identify which publicly traded stocks (US or HK) are directly or indirectly affected.
         
+        USER WATCHLIST (Prioritize these if relevant):
+        ${watchlist || "None configured"}
+
         Headlines:
         ${batch.map((h, idx) => `${idx + 1}. ${h}`).join('\n')}
         
-        BE AGGRESSIVE: Identify potential stocks even if the connection is indirect (e.g., "AI news" -> NVDA/MSFT, "Oil prices" -> XOM). We want to capture all plausible market moving events.
+        BE AGGRESSIVE: Identify potential stocks even if the connection is indirect (e.g., "AI news" -> NVDA/MSFT). 
+        IMPORTANT: If a headline mentions a theme related to a stock in the USER WATCHLIST, prioritize creating an opportunity for that stock.
         
         For each affected stock, provide:
         - symbol (Ticker e.g. AAPL, 0700.HK)
-        - reason (Why is it affected? Indirect links are okay e.g. "TSMC news affects AAPL supply chain")
+        - reason (Why is it affected? Indirect links are okay)
         - catalyst_type (EARNINGS | PRODUCT | REGULATION | MACRO | SOCIAL)
         - direction (BULLISH | BEARISH | NEUTRAL)
-        - impact_score (0.0 to 1.0, how big is the price impact?)
-        - confidence (0.0 to 1.0, how sure are you about this stock connection?)
+        - impact_score (0.0 to 1.0)
+        - confidence (0.0 to 1.0)
 
         Respond with ONLY a JSON array of objects:
         [

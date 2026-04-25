@@ -3,6 +3,7 @@ import express, { Request, Response, NextFunction } from "express";
 import helmet from "helmet";
 import axios from "axios";
 import { z } from "zod";
+import { v4 as uuidv4 } from "uuid";
 import { futu_service } from "./services/futuService";
 import { ollamaService } from "./services/ollamaService";
 import { ensemblePredictor } from "./services/ensemblePredictor";
@@ -13,6 +14,7 @@ import { logger } from "./core/Logger";
 import { config } from "./core/Config";
 import { query } from "./db/postgres";
 import { notificationQueue } from "./services/notificationQueue";
+import { startPolling } from "./services/telegramService";
 
 import { newsIntelAgent } from "./agents/pipeline/NewsIntelAgent";
 import { socialIntelAgent } from "./agents/pipeline/SocialIntelAgent";
@@ -81,12 +83,22 @@ const startServer = async () => {
   try {
     Scheduler.init();
     logger.info("[Server] V4 Scheduler running.");
+    
+    // Start Telegram Polling
+    startPolling();
   } catch (e: any) {
     logger.error("[Server] Scheduler failed.", { error: e.message });
   }
 
   const server = app.listen(port, "127.0.0.1", () => {
     logger.info(`[Server] ONLINE: http://127.0.0.1:${port}`);
+  }).on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      logger.error(`[Server] Port ${port} is already in use. Please run 'npm run preenterprise' to clear it.`);
+      process.exit(1);
+    } else {
+      logger.error(`[Server] Critical startup error:`, err);
+    }
   });
 
   const shutdown = async (signal: string) => {
@@ -357,7 +369,100 @@ app.post("/webhook", localOnly, async (req: Request, res: Response) => {
       return res.json({ content: `💰 Paper P&L:\n${lines}` });
     }
 
-    res.json({ content: "Commands: !status, !positions, !focus, !pnl" });
+    if (command === "!scrape") {
+      logger.info("[Webhook] Manual force-scrape triggered via Telegram");
+      // Trigger agents
+      const newsBatch = await newsIntelAgent.scrapeBroadNews();
+      const socialBatch = await socialIntelAgent.scrapeSocialIntel();
+
+      eventBus.publish('intel:news_batch', newsBatch);
+      eventBus.publish('intel:social_batch', { items: socialBatch });
+
+      return res.json({ content: "🚀 Scrape triggered! Scanning broad news and social sentiment..." });
+    }
+
+    if (command === "!etf") {
+      logger.info("[Webhook] Manual ETF scan triggered via Telegram");
+      await etfIntelAgent.runAnalysis();
+      return res.json({ content: "📡 ETF Analysis triggered! Checking sector rotations and relative strength..." });
+    }
+
+    if (command === "!testbuy") {
+      logger.info("[Webhook] Manual testbuy triggered via Telegram");
+      // Bypassing StrategyAgent data fetch to ensure the test works regardless of market data availability
+      const testPlan = {
+        correlation_id: uuidv4(),
+        symbol: 'NVDA',
+        action: 'BUY' as const,
+        entry_price: 138.50, // Realistic test price
+        best_target: 155.00,
+        safe_target: 145.00,
+        stop_loss: 132.00,
+        max_hold_days: 5,
+        confidence: 0.95,
+        reasoning: 'System test trigger to verify Paper Mode execution pipeline.',
+        catalyst_id: null,
+        timestamp: new Date()
+      };
+
+      // Publish to ExecutionAgent
+      eventBus.publish('strategy:trade_plan', testPlan);
+      
+      return res.json({ content: "🧪 Pipeline Test triggered! A Paper BUY for NVDA should execute immediately. Check Telegram!" });
+    }
+
+    if (command === "!sync") {
+      logger.info("[Webhook] Manual watchlist sync triggered via Telegram");
+      (async () => {
+        try {
+          const symbols = await futu_service.get_user_watchlist();
+          if (symbols.length > 0) {
+            await query("DELETE FROM user_watchlist");
+            for (const sym of symbols) {
+              await query("INSERT INTO user_watchlist (symbol) VALUES ($1) ON CONFLICT DO NOTHING", [sym]);
+            }
+            const { sendTelegramMessage } = await import("./services/telegramService");
+            await sendTelegramMessage(`✅ Watchlist sync complete! Captured ${symbols.length} symbols.`);
+          }
+        } catch (e: any) {
+          logger.error("[Webhook] Sync failed:", { error: e.message });
+        }
+      })();
+      return res.json({ content: "🔄 Syncing watchlist from Moomoo... This may take a moment." });
+    }
+
+    if (command === "!syncpos") {
+      logger.info("[Webhook] Manual position sync triggered via Telegram");
+      (async () => {
+        try {
+          const positions = await futu_service.get_real_positions();
+          const { sendTelegramMessage } = await import("./services/telegramService");
+          if (positions.length === 0) {
+            await sendTelegramMessage("📭 No open positions found.");
+            return;
+          }
+          const lines = positions.map((p: any) => {
+            const pnlSign = p.pnl >= 0 ? '+' : '';
+            const pnlPct = typeof p.pnl_pct === 'number' ? ` (${pnlSign}${(p.pnl_pct * 100).toFixed(2)}%)` : '';
+            return `• ${p.symbol} [${p.market}]: ${p.qty} shares @ $${Number(p.avg_price).toFixed(2)} | P&L: ${pnlSign}${Number(p.pnl).toFixed(2)}${pnlPct}`;
+          }).join('\n');
+          await sendTelegramMessage(`📊 *Real Positions (${positions.length}):*\n${lines}`);
+        } catch (e: any) {
+          logger.error("[Webhook] Position sync failed:", { error: e.message });
+        }
+      })();
+      return res.json({ content: "⏳ Fetching live positions from Moomoo... One moment." });
+    }
+
+    if (command === "!accounts") {
+      const accs = futu_service.get_all_accounts();
+      const lines = accs.map((a: any) => 
+        `• ID: ${a.accID} | Env: ${a.trdEnv === 1 ? 'REAL' : 'SIMULATE'} | Markets: ${a.trdMarketAuthList.join(',')}`
+      ).join('\n');
+      return res.json({ content: `🏦 *Discovered Accounts:* \n${lines}\n\n*Note:* If your Universal Account (3378) is not listed, please check your FutuOpenD login.` });
+    }
+
+    res.json({ content: "Commands: !status, !positions, !syncpos, !accounts, !focus, !pnl, !scrape, !etf, !testbuy, !sync" });
   } catch (e: any) {
     logger.error("[Webhook] Error:", { error: e.message });
     res.status(500).json({ error: "Webhook error" });

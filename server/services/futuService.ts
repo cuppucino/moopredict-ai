@@ -41,6 +41,7 @@ export class FutuService {
   public is_connected: boolean = false;
   private is_connecting: boolean = false;
   private acc_id: number = 0;
+  private accounts: any[] = [];
   private futuBreaker = new CircuitBreaker({ name: 'FutuOpenD', failureThreshold: 3, resetTimeoutMs: 60000 });
   private yahooBreaker = new CircuitBreaker({ name: 'YahooFinance', failureThreshold: 5, resetTimeoutMs: 30000 });
 
@@ -160,8 +161,17 @@ export class FutuService {
       }
 
       const acc_list: any[] = res.s2c?.accList || [];
-      logger.info(`[FutuService] Found ${acc_list.length} trading accounts`, {
-        accounts: acc_list.map((a: any) => ({ id: this.to_number(a.accID), env: a.trdEnv, markets: a.trdMarketAuthList }))
+      this.accounts = acc_list;
+      
+      // Log EVERY account detail to debug the "Universal Account" issue
+      logger.info(`[FutuService] FULL Account List:`, {
+        accounts: acc_list.map((a: any) => ({
+          accID: this.to_number(a.accID),
+          env: a.trdEnv === 1 ? 'REAL' : 'SIMULATE',
+          markets: a.trdMarketAuthList,
+          accType: a.accType,
+          cardNum: a.cardNum
+        }))
       });
 
       // find an account matching our desired env and market
@@ -191,6 +201,10 @@ export class FutuService {
   /**
    * --- Order Execution ---
    */
+
+  public get_all_accounts(): any[] {
+    return this.accounts;
+  }
 
   async get_board_lot(symbol: string): Promise<number> {
     if (!this.is_connected) throw new Error("FutuOpenD not connected");
@@ -316,26 +330,132 @@ export class FutuService {
     if (!this.is_connected) return [];
 
     return this.futuBreaker.execute(async () => {
-      const res: any = await this.client.GetPositionList({
-        c2s: {
-          header: {
-            trdEnv: this.get_trd_env(),
-            trdMarket: config.TRADE_MARKET === 'US' ? TrdMarket.TrdMarket_US : TrdMarket.TrdMarket_HK,
-            accID: this.acc_id,
-          }
-        }
+      const all: any[] = [];
+
+      logger.info(`[FutuService] All known accounts:`, {
+        accounts: this.accounts.map((a: any) => ({
+          accID: this.to_number(a.accID),
+          env: a.trdEnv === 1 ? 'REAL' : 'PAPER',
+          markets: a.trdMarketAuthList,
+          accType: a.accType,
+        }))
       });
 
+      // Always use real (live) accounts for position sync, regardless of system trade mode
+      const realEnv = TrdEnv.TrdEnv_Real ?? 1;
+      const targetAccounts = this.accounts.filter((a: any) => a.trdEnv === realEnv);
 
-      if (res.retType !== 0) throw new Error(res.retMsg || `GetPositionList failed with retType=${res.retType}`);
+      for (const acc of targetAccounts) {
+        const accID = this.to_number(acc.accID);
+        const preferred_market = config.TRADE_MARKET === 'US' ? TrdMarket.TrdMarket_US : TrdMarket.TrdMarket_HK;
+        
+        // Each account may have multiple authorized markets, but we only care about the focus market
+        const markets = (acc.trdMarketAuthList || []).filter((m: any) => m === preferred_market);
 
-      return (res.s2c?.positionList || []).map((p: any) => ({
-        symbol: p.code,
-        qty: p.qty,
-        avg_price: p.costPrice,
-        current_price: p.canSellQty > 0 ? p.costPrice : 0,
-        pnl: p.plVal
-      }));
+        for (const market of markets) {
+          try {
+            const res: any = await this.client.GetPositionList({
+              c2s: {
+                header: {
+                  trdEnv: realEnv,
+                  trdMarket: market,
+                  accID: accID,
+                }
+              }
+            });
+
+            if (res.retType !== 0) {
+              logger.warn(`[FutuService] GetPositionList failed for market ${market} (Acc: ${accID}): ${res.retMsg}`);
+              continue;
+            }
+
+            const rawPositions = res.s2c?.positionList || [];
+            logger.info(`[FutuService] Raw positions for Acc ${accID} Market ${market}:`, {
+              count: rawPositions.length,
+              positions: rawPositions.map((p: any) => ({ code: p.code, qty: p.qty, price: p.curPrice }))
+            });
+
+            const positions = rawPositions.map((p: any) => ({
+              symbol: p.code,
+              qty: p.qty,
+              avg_price: p.costPrice,
+              current_price: p.curPrice ?? p.costPrice,
+              pnl: p.plVal,
+              pnl_pct: p.plRatio ?? 0,
+              market: market === TrdMarket.TrdMarket_HK ? 'HK' : 'US',
+              accID: accID
+            }));
+
+            all.push(...positions);
+          } catch (err: any) {
+            logger.warn(`[FutuService] GetPositionList error for market ${market} (Acc: ${accID}): ${err.message}`);
+          }
+        }
+      }
+
+      return all;
+    });
+  }
+  
+  /**
+   * Fetches the user's custom watchlist symbols from Moomoo OpenD
+   */
+  async get_user_watchlist(): Promise<string[]> {
+    if (!this.is_connected) return [];
+
+    return this.futuBreaker.execute(async () => {
+      try {
+        // 1. Get Group List (Use GroupType_All = 3 to catch Favorites, US, HK, etc.)
+        const groupRes: any = await this.client.GetUserSecurityGroup({
+          c2s: { groupType: 3 }
+        }, 25000);
+
+        if (groupRes.retType !== 0) {
+          logger.warn(`[FutuService] GetUserSecurityGroup failed: ${groupRes.retMsg}`);
+          return [];
+        }
+
+        const groups = groupRes.s2c?.groupList || [];
+        // Filter groups to avoid syncing things like "Futures" or "Crypto" if not desired,
+        // but for now, let's just prioritize the common ones.
+        const targetGroups = ["Favorites", "US", "HK", "MY", "SG"];
+        const filteredGroups = groups.filter((g: any) => targetGroups.includes(g.groupName) || g.groupType === 1);
+
+        const allSymbols: Set<string> = new Set();
+        
+        // 2. Fetch securities for each group
+        for (const group of filteredGroups) {
+          const secRes: any = await this.client.GetUserSecurity({
+            c2s: { groupName: group.groupName }
+          }, 25000);
+          
+          if (secRes.retType === 0) {
+            const securities = secRes.s2c?.staticInfoList || [];
+            for (const sec of securities) {
+              const code = sec.basic?.security?.code;
+              const market = sec.basic?.security?.market;
+              
+              if (code && market) {
+                // Add appropriate suffix based on market
+                let suffix = '';
+                if (market === QotMarket.QotMarket_HK_Security) suffix = '.HK';
+                else if (market === QotMarket.QotMarket_US_Security) suffix = ''; // US usually doesn't need suffix in this system
+                else if (market === QotMarket.QotMarket_MY_Security) suffix = '.MY';
+                else if (market === QotMarket.QotMarket_SG_Security) suffix = '.SG';
+                
+                allSymbols.add(`${code}${suffix}`);
+              }
+            }
+          }
+        }
+        
+        const symbols = Array.from(allSymbols);
+        logger.info(`[FutuService] Synced ${symbols.length} symbols from Moomoo watchlist`);
+        return symbols;
+      } catch (error: any) {
+        logger.error(`[FutuService] Watchlist sync error: ${error.message}`);
+        return [];
+      }
     });
   }
 

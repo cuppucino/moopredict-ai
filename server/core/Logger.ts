@@ -15,10 +15,13 @@ const jsonFormat = winston.format.combine(
   winston.format.json()
 );
 
-// Safe JSON serializer that handles circular references
+// Safe JSON serializer that handles circular references and truncates large payloads
 const safe_stringify = (obj: unknown): string => {
   const seen = new WeakSet();
   return JSON.stringify(obj, (_key, value) => {
+    if (typeof value === 'string' && value.length > 1000) {
+      return value.substring(0, 1000) + '... [TRUNCATED]';
+    }
     if (typeof value === 'object' && value !== null) {
       if (seen.has(value)) return '[Circular]';
       seen.add(value);

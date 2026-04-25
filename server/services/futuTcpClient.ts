@@ -16,6 +16,7 @@ export class FutuTcpClient {
   public onpush: ((cmd: number, response: any) => void) | null = null;
 
   private connID: string = "0";
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   private readonly METHOD_MAP: Record<string, { id: number, proto: string }> = {
     "InitConnect":         { id: 1001, proto: "InitConnect" },
@@ -25,9 +26,12 @@ export class FutuTcpClient {
     "PlaceOrder":          { id: 2201, proto: "Trd_PlaceOrder" },
     "Sub":                 { id: 3001, proto: "Qot_Sub" },
     "RegQotPush":          { id: 3002, proto: "Qot_RegQotPush" },
-    "GetSecuritySnapshot": { id: 3005, proto: "Qot_GetSecuritySnapshot" },
+    "GetSecuritySnapshot": { id: 3203, proto: "Qot_GetSecuritySnapshot" },
     "GetKL":               { id: 3006, proto: "Qot_GetKL" },
-    "GetHistoryKL":        { id: 3003, proto: "Qot_GetHistoryKL" }
+    "GetHistoryKL":        { id: 3100, proto: "Qot_GetHistoryKL" },
+    "GetUserSecurityGroup": { id: 3222, proto: "Qot_GetUserSecurityGroup" },
+    "GetUserSecurity":      { id: 3213, proto: "Qot_GetUserSecurity" },
+    "KeepAlive":            { id: 1004, proto: "KeepAlive" }
   };
 
   constructor(protoRoot: any) {
@@ -40,7 +44,7 @@ export class FutuTcpClient {
         
         const mapping = target.METHOD_MAP[prop];
         if (mapping) {
-          return (payload: any) => target._sendCmd(mapping.id, payload, mapping.proto);
+          return (payload: any, timeoutMs?: number) => target._sendCmd(mapping.id, payload, mapping.proto, timeoutMs);
         }
         return undefined;
       }
@@ -106,8 +110,30 @@ export class FutuTcpClient {
 
     this.socket.on('close', () => {
       logger.warn('[FutuTcpClient] Connection closed');
+      this.stopHeartbeat();
     });
     }); // closes new Promise
+
+    this.startHeartbeat();
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(async () => {
+      if (!this.socket) return;
+      try {
+        await (this as any).KeepAlive({ c2s: { time: Math.floor(Date.now() / 1000) } });
+      } catch {
+        // Heartbeat failure is non-fatal — connection close event will handle cleanup
+      }
+    }, 20000);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
   }
 
   private handlePacket(protoID: number, serialNo: number, body: Buffer) {
@@ -138,7 +164,7 @@ export class FutuTcpClient {
     }
   }
 
-  public async _sendCmd(protoID: number, payload: any, protoName: string): Promise<any> {
+  public async _sendCmd(protoID: number, payload: any, protoName: string, timeoutMs = 30000): Promise<any> {
     if (!this.socket) throw new Error('Not connected');
 
     const serialNo = ++this.serialNo;
@@ -174,7 +200,7 @@ export class FutuTcpClient {
       const timeout = setTimeout(() => {
         this.responseHandlers.delete(serialNo);
         reject(new Error(`Timeout waiting for response to ${protoName} (${protoID})`));
-      }, 10000);
+      }, timeoutMs);
 
       this.responseHandlers.set(serialNo, (responseBody) => {
         clearTimeout(timeout);

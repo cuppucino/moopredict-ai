@@ -112,6 +112,11 @@ export class EnsemblePredictor {
     // Get Ollama prediction if available
     let ollamaResult: EnsembleInput["ollamaPrediction"] | undefined;
     if (this.useOllama && await ollamaService.isReady()) {
+      // 1. New Technical Analysis (inspired by HKUDS AI-Trader)
+      const { TechnicalAnalyzer } = await import("../utils/TechnicalAnalyzer");
+      const techSummary = TechnicalAnalyzer.analyze(stockData.history);
+
+      // 2. Generate Consensus Prediction via Ollama
       ollamaResult = await ollamaService.predictFromTechnical(
         stockData,
         {
@@ -119,13 +124,13 @@ export class EnsemblePredictor {
           macd_trend: geminiResult.technicalIndicators.macd,
           bb_position: geminiResult.technicalIndicators.rsi > 70 ? "ABOVE_UPPER" : 
             geminiResult.technicalIndicators.rsi < 30 ? "BELOW_LOWER" : "MIDDLE",
-          bb_squeeze: false,
-          bb_width: 0,
-          market_structure: "Sideways",
-          mss_detected: false,
-          nearest_resistance_pct: 0,
-          nearest_support_pct: 0,
-          price_vs_sma20: geminiResult.technicalIndicators.movingAverage
+          bb_squeeze: techSummary.volatility > 0.02,
+          bb_width: techSummary.volatility,
+          market_structure: techSummary.trend as any,
+          mss_detected: techSummary.ma_signal !== 'STEADY',
+          nearest_resistance_pct: techSummary.resistance[0] ? ((techSummary.resistance[0] / stockData.price) - 1) * 100 : 0,
+          nearest_support_pct: techSummary.support[0] ? ((techSummary.support[0] / stockData.price) - 1) * 100 : 0,
+          price_vs_sma20: techSummary.trend === 'BULLISH' ? 'Above' : 'Below'
         },
         newsHeadlines || []
       );

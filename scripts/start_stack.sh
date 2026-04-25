@@ -21,10 +21,11 @@ pkill -f "notify-poller.mjs" 2>/dev/null && sleep 1 || true
 # 2. Start Notification Poller
 echo "📬 Starting Notification Poller..."
 mkdir -p logs
-node scripts/notify-poller.mjs >> logs/poller.log 2>&1 &
+node --max-old-space-size=256 scripts/notify-poller.mjs >> logs/poller.log 2>&1 &
 POLLER_PID=$!
 
 # 2. Start Main Server
 echo "🧠 Starting Enterprise Server (Port 3001)..."
 # We run this in the foreground so the user sees the logs and can Ctrl+C
-npx tsx server/server.ts
+# Note: tsx respects NODE_OPTIONS for memory limits
+NODE_OPTIONS="--max-old-space-size=2048" npx tsx server/server.ts

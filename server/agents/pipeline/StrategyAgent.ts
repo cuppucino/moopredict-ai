@@ -72,17 +72,17 @@ export class StrategyAgent {
           symbol: opt.symbol,
           action: (prediction.recommendation.includes('BUY') ? 'BUY' : 'SELL') as 'BUY' | 'SELL',
           entry_price: stockData.price,
-          best_target: bestTarget,
-          safe_target: safeTarget,
-          stop_loss: stopLoss,
+          best_target: prediction.targetPrice || (stockData.price * (1 + 0.10)),
+          safe_target: stockData.price * (1 + 0.05),
+          stop_loss: prediction.stop_loss || (stockData.price * (1 - 0.05)),
           max_hold_days: 5,
           confidence: combinedConfidence,
-          reasoning: `${opt.reason}. Ensemble: ${prediction.analysis}`,
-          catalyst_id: null // Will link if found in active_focus
+          reasoning: prediction.analysis || opt.reason,
+          technical_summary: `Trend: ${prediction.technicalIndicators?.macd || 'N/A'}, RSI: ${prediction.technicalIndicators?.rsi || 'N/A'}`
         };
 
         // 6. Store and Send to Telegram
-        await this.storeAndNotify(tradePlan, opt);
+        await this.storeAndNotify(tradePlan, opt, prediction);
 
         // 7. Emit trade plan for Team D
         eventBus.publish('strategy:trade_plan', {
@@ -124,7 +124,7 @@ export class StrategyAgent {
     return currentMarketCount < this.maxPositionsPerMarket;
   }
 
-  private async storeAndNotify(plan: any, opt: Opportunity): Promise<void> {
+  private async storeAndNotify(plan: any, opt: Opportunity, prediction: any): Promise<void> {
     // Link to catalyst in active_focus
     const focusResult = await query(`
       SELECT id FROM active_focus WHERE symbol = $1 AND status = 'ACTIVE' LIMIT 1
@@ -147,19 +147,23 @@ export class StrategyAgent {
       plan.reasoning
     ]);
 
-    // Format Telegram Message
+    // Format Telegram Message (HKUDS Style Consensus Snapshot)
     const isHK = plan.symbol.endsWith('.HK') || /^\d+$/.test(plan.symbol);
+    const riskEmoji = prediction.riskLevel === 'HIGH' ? '🔴' : prediction.riskLevel === 'MEDIUM' ? '🟡' : '🟢';
+    
     const message = `
 ━━━━━━━━━━━━━━━━━━━━━━
-📐 *TRADE PROPOSAL: ${plan.action} ${plan.symbol}*
+🎯 *TRADE CONSENSUS: ${plan.symbol}*
 ━━━━━━━━━━━━━━━━━━━━━━
-📰 *Catalyst:* ${opt.reason}
-📊 *Confidence:* ${Math.round(plan.confidence * 100)}% | Impact: ${opt.impact_score > 0.7 ? 'HIGH' : 'MEDIUM'}
+🏁 *Action:* ${plan.action} (${prediction.recommendation})
+📊 *Confidence:* ${Math.round(plan.confidence * 100)}% | Risk: ${riskEmoji} ${prediction.riskLevel}
+🌍 *Macro Signal:* ${prediction.macro_signal || 'NEUTRAL'}
 
-📋 *PLAN:*
+📝 *CONSENSUS SNAPSHOT:*
+_${plan.reasoning}_
+
+📐 *PLAN:*
 • Entry: $${plan.entry_price.toFixed(2)}
-• 🥇 Best Target: $${plan.best_target.toFixed(2)} (+${Math.round(((plan.best_target / plan.entry_price) - 1) * 100)}%)
-• 🥈 Safe Target: $${plan.safe_target.toFixed(2)} (+${Math.round(((plan.safe_target / plan.entry_price) - 1) * 100)}%)
 • 🛑 Stop Loss: $${plan.stop_loss.toFixed(2)} (-${Math.round((1 - (plan.stop_loss / plan.entry_price)) * 100)}%)
 • ⏱️ Max Hold: 5 days
 • 📰 Event Hold: ${opt.direction === 'BULLISH' ? 'YES' : 'NO'}

@@ -135,8 +135,11 @@ export class EventBus extends EventEmitter {
       logger.warn(`[EventBus] Dead Letter: No listeners for event "${name}"`, { event: name, correlation_id });
     }
 
+    // Sanitize payload for history (prevent memory leaks from huge news/social batches)
+    const historyPayload = this.sanitizeForHistory(fullPayload);
+
     // Add to history ring buffer
-    this.history.push({ name, payload: fullPayload });
+    this.history.push({ name, payload: historyPayload });
     if (this.history.length > this.MAX_HISTORY) {
       this.history.shift();
     }
@@ -145,6 +148,26 @@ export class EventBus extends EventEmitter {
     this.emit(name, fullPayload);
 
     return correlation_id;
+  }
+
+  /**
+   * Truncates large arrays in payloads to keep memory usage low in history buffer.
+   */
+  private sanitizeForHistory(payload: any): any {
+    try {
+      const sanitized = { ...payload };
+      for (const key in sanitized) {
+        if (Array.isArray(sanitized[key]) && sanitized[key].length > 20) {
+          sanitized[key] = [
+            ...sanitized[key].slice(0, 10),
+            `... [Truncated ${sanitized[key].length - 20} more items]`
+          ];
+        }
+      }
+      return sanitized;
+    } catch {
+      return { error: 'Sanitization failed' };
+    }
   }
 
   /**

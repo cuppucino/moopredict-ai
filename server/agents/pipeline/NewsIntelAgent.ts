@@ -20,9 +20,8 @@ export class NewsIntelAgent {
   private parser: Parser;
   private sources = [
     { name: 'Yahoo Finance RSS', url: 'https://finance.yahoo.com/news/rss' },
-    { name: 'Google News', url: 'https://news.google.com/rss/search?q=finance+when:2h' },
-    { name: 'MarketWatch', url: 'https://www.marketwatch.com/rss/topstories' },
-    { name: 'SCMP Business', url: 'https://www.scmp.com/rss/318210/feed' }
+    { name: 'Google News', url: 'https://news.google.com/rss/search?q=US+stock+market+when:2h' },
+    { name: 'MarketWatch', url: 'https://www.marketwatch.com/rss/topstories' }
   ];
 
   constructor() {
@@ -42,7 +41,9 @@ export class NewsIntelAgent {
         logger.info(`[NewsIntelAgent] Scraping ${source.name}...`);
         const feed = await this.parser.parseURL(source.url);
         
-        for (const item of feed.items) {
+        // Cap at 50 articles per source
+        const items = feed.items.slice(0, 50);
+        for (const item of items) {
           if (!item.title || !item.link) continue;
 
           const article = {
@@ -84,8 +85,11 @@ export class NewsIntelAgent {
       logger.error(`[NewsIntelAgent] Yahoo Search scrape failed:`, { error });
     }
 
+    // Final safety cap: 100 articles total per batch
+    const limitedArticles = allArticles.slice(0, 100);
+
     // Deduplicate and store
-    const uniqueArticles = await this.deduplicateAndStore(allArticles);
+    const uniqueArticles = await this.deduplicateAndStore(limitedArticles);
     
     logger.info(`[NewsIntelAgent] Scrape complete. Found ${uniqueArticles.length} unique articles.`);
     
@@ -96,8 +100,62 @@ export class NewsIntelAgent {
     return {
       correlation_id: uuidv4(),
       timestamp: new Date(),
-      headlines: uniqueArticles.map(a => a.headline),
+      headlines: uniqueArticles.map(a => a.headline).slice(0, 100),
       source: 'Broad'
+    };
+  }
+
+  /**
+   * Scrapes targeted news for symbols in the user's watchlist
+   */
+  public async scrapeWatchlistNews(): Promise<NewsIntelBatch> {
+    logger.info('[NewsIntelAgent] Starting targeted watchlist news scrape...');
+    
+    const watchlist = await query("SELECT symbol FROM user_watchlist");
+    const symbols = watchlist.rows.map((r: any) => r.symbol);
+    
+    if (symbols.length === 0) {
+      logger.info('[NewsIntelAgent] Watchlist is empty, skipping targeted scrape.');
+      return { correlation_id: uuidv4(), timestamp: new Date(), headlines: [], source: 'Watchlist' };
+    }
+
+    const allArticles: any[] = [];
+    const headlines: string[] = [];
+
+    // For each symbol, fetch the latest news from Yahoo Finance
+    for (const symbol of symbols) {
+      try {
+        // Add a small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        
+        logger.info(`[NewsIntelAgent] Fetching targeted news for ${symbol}...`);
+        const result: any = await yahooFinance.search(symbol, { newsCount: 3, quotesCount: 0 });
+        const newsItems = result.news || [];
+        
+        for (const item of newsItems) {
+          allArticles.push({
+            headline: `[${symbol}] ${item.title}`,
+            summary: item.title,
+            source: 'Targeted Search',
+            url: item.link,
+            scraped_at: new Date()
+          });
+          headlines.push(`[${symbol}] ${item.title}`);
+        }
+      } catch (error) {
+        logger.error(`[NewsIntelAgent] Targeted scrape failed for ${symbol}:`, { error });
+      }
+    }
+
+    // Deduplicate and store
+    const uniqueArticles = await this.deduplicateAndStore(allArticles);
+    logger.info(`[NewsIntelAgent] Watchlist scrape complete. Found ${uniqueArticles.length} new targeted articles.`);
+    
+    return {
+      correlation_id: uuidv4(),
+      timestamp: new Date(),
+      headlines: uniqueArticles.map(a => a.headline),
+      source: 'Watchlist'
     };
   }
 

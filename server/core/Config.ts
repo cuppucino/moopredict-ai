@@ -30,8 +30,8 @@ const ConfigSchema = z.object({
   // --- Market Config ---
   // HK market hours: 9:30-12:00 & 13:00-16:00 HKT (UTC+8)
   // In UTC: 01:30-04:00 & 05:00-08:00
-  TRADE_MARKET: z.enum(['HK', 'US']).default('HK'),
-  TRADE_CURRENCY: z.string().default('HKD'),
+  TRADE_MARKET: z.enum(['HK', 'US']).default('US'),
+  TRADE_CURRENCY: z.string().default('USD'),
 
   // --- Trading Thresholds ---
   // Symbols with poor backtest performance that should never be auto-traded.
@@ -41,8 +41,8 @@ const ConfigSchema = z.object({
   SIGNAL_CONFIDENCE_MIN: z.coerce.number().min(0).max(1).default(0.50),
   SIGNAL_CONFIDENCE_HIGH: z.coerce.number().min(0).max(1).default(0.70),
   RISK_BLOCK_THRESHOLD: z.coerce.number().min(0).max(100).default(90),
-  MAX_DAILY_LOSS_HKD: z.coerce.number().default(1000),   // ~$125 USD
-  TRADE_LOT_VALUE_HKD: z.coerce.number().default(15000), // Updated budget for HK lots
+  MAX_DAILY_LOSS_USD: z.coerce.number().default(500),
+  TRADE_LOT_VALUE_USD: z.coerce.number().default(2000),
   MAX_CONCURRENT_POSITIONS: z.coerce.number().default(10),
 
   // --- Position Management ---

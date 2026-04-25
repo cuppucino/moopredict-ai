@@ -104,3 +104,65 @@ export const sendTelegramPhoto = async (
  * Use this to decide whether to prefer direct Telegram or fall back to OpenClaw.
  */
 export const isTelegramAvailable = (): boolean => AVAILABLE;
+
+let last_update_id = 0;
+let is_polling = false;
+
+/**
+ * Start polling for Telegram commands.
+ * Listens for messages starting with '!' and forwards them to the local /webhook endpoint.
+ */
+export const startPolling = async () => {
+  if (!AVAILABLE || is_polling) return;
+  is_polling = true;
+  logger.info("[Telegram] Starting command polling...");
+
+  const poll = async () => {
+    try {
+      const url = `https://api.telegram.org/bot${config.TELEGRAM_BOT_TOKEN}/getUpdates?offset=${last_update_id + 1}&timeout=20`;
+      const response = await axios.get(url, { timeout: 25000 });
+
+      if (response.data?.ok && response.data.result.length > 0) {
+        for (const update of response.data.result) {
+          last_update_id = update.update_id;
+          const text = update.message?.text;
+          const chatId = update.message?.chat?.id;
+          const username = update.message?.from?.username || "unknown";
+
+          if (chatId) {
+            logger.info(`[Telegram] Incoming from ${username} (${chatId}): ${text}`);
+          }
+
+          if (text?.startsWith('!') && chatId?.toString() === config.TELEGRAM_CHAT_ID?.toString()) {
+            logger.info(`[Telegram] Command received: ${text}`);
+            
+            // Forward to local webhook
+            try {
+              // Note: Using 127.0.0.1:3001 as defined in server.ts
+              const res = await axios.post('http://127.0.0.1:3001/webhook', 
+                { content: text }, 
+                { timeout: 30000 }
+              );
+              
+              if (res.data?.content) {
+                await sendTelegramMessage(res.data.content);
+              }
+            } catch (e: any) {
+              logger.error(`[Telegram] Webhook forwarding failed: ${e.message}`);
+              await sendTelegramMessage(`❌ Command execution failed: ${e.message}`);
+            }
+          }
+        }
+      }
+    } catch (error: any) {
+      if (error.code !== 'ECONNABORTED' && error.code !== 'ETIMEDOUT') {
+        logger.error(`[Telegram] Polling error: ${error.message}`);
+      }
+    } finally {
+      // Continue polling
+      setTimeout(poll, 2000);
+    }
+  };
+
+  poll();
+};

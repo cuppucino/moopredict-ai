@@ -15,11 +15,10 @@ export class Scheduler {
     // 1. Team A: Intelligence Layer (Every hour during market windows)
     this.tasks.push(cron.schedule("0 * * * 1-5", async () => {
       const hour = new Date().getHours();
-      // HK: 07:00 - 17:00, US: 20:00 - 05:00
-      const isHKWindow = (hour >= 7 && hour <= 17);
+      // Focus purely on US Trading Window (Approx. 20:00 - 05:00 HKT)
       const isUSWindow = (hour >= 20 || hour <= 5);
 
-      if (isHKWindow || isUSWindow) {
+      if (isUSWindow) {
         try {
           logger.info(`[Scheduler] V4 Team A: Starting intelligence scrape (Hour: ${hour})...`);
           const newsBatch = await newsIntelAgent.scrapeBroadNews();
@@ -33,7 +32,20 @@ export class Scheduler {
       }
     }));
 
-    // 2. Team D: Position Monitor (Every 15 minutes during market hours)
+    // 2. Targeted Intelligence (Watchlist Sync - Every 30 mins)
+    this.tasks.push(cron.schedule("*/30 * * * *", async () => {
+        try {
+          logger.info("[Scheduler] Starting targeted watchlist news scrape...");
+          const watchlistBatch = await newsIntelAgent.scrapeWatchlistNews();
+          if (watchlistBatch.headlines.length > 0) {
+            eventBus.publish('intel:news_batch', watchlistBatch);
+          }
+        } catch (error) {
+          logger.error("[Scheduler] Targeted scrape failed:", { error });
+        }
+    }));
+
+    // 3. Team D: Position Monitor (Every 15 minutes during market hours)
     this.tasks.push(cron.schedule("*/15 * * * 1-5", async () => {
       try {
         await executionAgent.monitorPositions();
@@ -53,13 +65,6 @@ export class Scheduler {
     }));
 
     // 5. Market Reminders & Intelligence Summaries
-    // HK Opening (09:15 HKT)
-    this.tasks.push(cron.schedule("15 9 * * 1-5", async () => {
-      await sendTelegramMessage("🌅 *HK MORNING INTEL REPORT*\n━━━━━━━━━━━━━━━━━━━━━━\n_Checking watchlist and focus symbols..._", "info");
-      // Trigger a fresh scrape for the opening
-      const newsBatch = await newsIntelAgent.scrapeBroadNews();
-      eventBus.publish('intel:news_batch', newsBatch);
-    }));
 
     // US Opening (21:15 HKT)
     this.tasks.push(cron.schedule("15 21 * * 1-5", async () => {
@@ -69,19 +74,11 @@ export class Scheduler {
       eventBus.publish('intel:news_batch', newsBatch);
     }));
 
-    this.tasks.push(cron.schedule("20 9 * * 1-5", async () => {
-      await sendTelegramMessage("🔔 *HK MARKET OPENING SOON* (10m)", "info");
-    }));
     this.tasks.push(cron.schedule("20 21 * * 1-5", async () => {
       await sendTelegramMessage("🔔 *US MARKET OPENING SOON* (10m)", "info");
     }));
 
     // 6. ETF Intelligence Module
-    // HK Pre-market (08:00 HKT)
-    this.tasks.push(cron.schedule("0 8 * * 1-5", async () => {
-      logger.info("[Scheduler] Triggering ETF HK Pre-market scan...");
-      eventBus.publish('etf:force_scan', {});
-    }));
 
     // US Pre-market (20:00 HKT)
     this.tasks.push(cron.schedule("0 20 * * 1-5", async () => {
@@ -95,9 +92,9 @@ export class Scheduler {
       eventBus.publish('etf:force_scan', {});
     }));
 
-    // ETF Morning Briefings (08:30 & 20:30 HKT)
-    this.tasks.push(cron.schedule("30 8,20 * * 1-5", async () => {
-      logger.info("[Scheduler] Triggering ETF Morning Briefing...");
+    // ETF Morning Briefings (20:30 HKT for US)
+    this.tasks.push(cron.schedule("30 20 * * 1-5", async () => {
+      logger.info("[Scheduler] Triggering ETF US Morning Briefing...");
       eventBus.publish('etf:morning_briefing', {});
     }));
 

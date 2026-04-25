@@ -101,29 +101,38 @@ JSON:`;
       : "";
 
     const prompt = `
-Analyze the following REAL market data for ${stock.name} (${stock.symbol}) and provide a precise prediction.
+Analyze the following REAL market data for ${stock.name} (${stock.symbol}) and provide a concise market snapshot paragraph for a trading dashboard.
 
-## Snapshot
-- Price: $${stock.price}
-- Change: ${stock.changePercent}%
+## Rules:
+- Keep the "analysis" under 60 words.
+- Be specific and grounded only in the supplied metrics.
+- Mention the strongest support and strongest risk.
+- Do not use bullet points.
+- Do not mention AI, models, or uncertainty disclaimers.
+
+## Market Data:
+- Symbol: ${stock.symbol}
+- Current Price: $${stock.price}
+- Price Change: ${stock.changePercent}%
 - RSI (14): ${computed.rsi}
 - MACD: ${computed.macd_trend}
 - Bollinger Band: ${computed.bb_position}
-- BB Squeeze: ${computed.bb_squeeze ? 'YES — breakout likely imminent' : 'NO'} (width: ${computed.bb_width})
-- Market Structure: ${computed.market_structure}${computed.mss_detected ? ' — WARNING: STRUCTURE SHIFT DETECTED' : ''}
-- Nearest Resistance: ${computed.nearest_resistance_pct}% above current price
-- Nearest Support: ${computed.nearest_support_pct}% below current price
-- Price vs SMA 20: ${computed.price_vs_sma20}
+- BB Squeeze: ${computed.bb_squeeze ? 'YES — breakout likely' : 'NO'}
+- Market Structure: ${computed.market_structure}
+- Support: ${computed.nearest_support_pct}% below
+- Resistance: ${computed.nearest_resistance_pct}% above
+- Trend vs SMA20: ${computed.price_vs_sma20}
 ${newsSection}
 
-Based ONLY on the data above, output a JSON object:
+## Output Format (JSON):
 {
   "symbol": "${stock.symbol}",
   "recommendation": "STRONG_BUY" | "BUY" | "HOLD" | "SELL" | "STRONG_SELL",
-  "confidence": <0.40 to 0.85 float>,
-  "targetPrice": <realistic 30-day target number>,
-  "analysis": "2-3 sentences max referencing the specific indicators above",
-  "riskLevel": "LOW" | "MEDIUM" | "HIGH"
+  "confidence": <float>,
+  "targetPrice": <realistic target>,
+  "analysis": "Grounded paragraph under 60 words",
+  "riskLevel": "LOW" | "MEDIUM" | "HIGH",
+  "macro_signal": "BULLISH" | "BEARISH" | "NEUTRAL"
 }
 
 Respond with ONLY valid JSON.
@@ -558,7 +567,7 @@ Respond with ONLY valid JSON:
         stream: false,
         format: "json",
         options: { temperature: 0.1, num_predict: 500 }
-      }, { timeout: timeoutMs });
+      }, { timeout: 120000 });
 
       const content = response.data?.response || "";
       return JSON.parse(content);
