@@ -2,7 +2,6 @@ import { eventBus } from '../../core/EventBus';
 import { query } from '../../db/postgres';
 import { tradeStore } from '../../services/tradeStore';
 import { sendTelegramMessage } from '../../services/telegramService';
-import { marketHoursService } from '../../services/marketHoursService';
 import { futu_service } from '../../services/futuService';
 import { logger } from '../../core/Logger';
 import { ETF_WATCHLIST } from '../../core/EtfWatchlist';
@@ -17,34 +16,30 @@ export class ExecutionAgent {
       await this.handleTradeExecution(plan);
     });
 
-    // Monitor positions for exit conditions
     eventBus.subscribe('system:hourly_flush', async () => {
       await this.monitorPositions();
     });
   }
 
   /**
-   * Handles trade execution (Paper Mode for both HK and US)
+   * Handles trade execution (Paper Mode, US market only)
    */
   public async handleTradeExecution(plan: any): Promise<void> {
     const { symbol, action, entry_price, correlation_id } = plan;
-    const isHK = symbol.endsWith('.HK') || /^\d+$/.test(symbol);
-    const currency = isHK ? 'HKD' : 'USD';
+    const currency = 'USD';
 
     try {
-      // 0. Final Sanity Check
       if (entry_price <= 0 || entry_price === 100.00) {
         logger.error(`[ExecutionAgent] ABORTED: Invalid price $${entry_price} for ${symbol}.`);
         return;
       }
 
-      // 1. Check virtual balance
       const balanceResult = await query(`
         SELECT current_balance FROM virtual_portfolio WHERE currency = $1
       `, [currency]);
       const balance = parseFloat(balanceResult.rows[0].current_balance);
 
-      const maxAllocation = isHK ? 15000 : 1500; // HKD 15k or USD 1.5k
+      const maxAllocation = 1500;
       const tradeValue = Math.min(balance * 0.3, maxAllocation);
       const qty = Math.floor(tradeValue / entry_price);
 
@@ -53,51 +48,44 @@ export class ExecutionAgent {
         return;
       }
 
-      // 2. Simulate "Execution"
       const totalCost = qty * entry_price;
 
-      // 3. Update Virtual Portfolio and Positions
       if (action === 'BUY') {
-        // Deduct balance
         await query(`
-          UPDATE virtual_portfolio 
+          UPDATE virtual_portfolio
           SET current_balance = current_balance - $1, updated_at = NOW()
           WHERE currency = $2
         `, [totalCost, currency]);
 
-        // Add position
         await tradeStore.addPosition({
           symbol,
           mode: 'PAPER',
           qty,
           entry_price,
           side: 'LONG',
-          stop_loss_pct: 5,   // plan.stop_loss is absolute, but addPosition takes pct
+          stop_loss_pct: 5,
           take_profit_pct: 10
         });
 
-        // Update trade_proposals status to EXECUTED so monitorPositions can find it
         await query(`
           UPDATE trade_proposals SET status = 'EXECUTED'
           WHERE symbol = $1 AND status = 'PENDING'
         `, [symbol.toUpperCase()]);
-        
+
         logger.info(`[ExecutionAgent] Paper BUY executed: ${qty} ${symbol} at $${entry_price}`);
       }
 
-      // 4. Notify Telegram
       const message = `
 ✅ *TRADE EXECUTED (Paper Mode)*
 Symbol: ${symbol}
 Action: ${action}
 Qty: ${qty}
 Price: $${entry_price.toFixed(2)}
-Value: ${currency} ${totalCost.toFixed(2)}
+Value: USD ${totalCost.toFixed(2)}
 ━━━━━━━━━━━━━━━━━━━━━━
       `.trim();
       await sendTelegramMessage(message, 'info');
 
-      // 5. Emit result for tracking
       eventBus.publish('executor:result', {
         correlation_id,
         symbol,
@@ -118,22 +106,18 @@ Value: ${currency} ${totalCost.toFixed(2)}
    */
   public async monitorPositions(): Promise<void> {
     const positions = await tradeStore.getPositions();
-    
+
     for (const pos of positions) {
-      // Simple logic: check if price hit plan targets or stop loss
-      // In V4, StrategyAgent defines best_target, safe_target, stop_loss in trade_proposals
-      // We should fetch the proposal for this position
       const proposalResult = await query(`
         SELECT * FROM trade_proposals WHERE symbol = $1 AND status = 'EXECUTED' ORDER BY created_at DESC LIMIT 1
       `, [pos.symbol]);
-      
+
       const proposal = proposalResult.rows[0];
       if (!proposal) continue;
 
       try {
         const stockData = await futu_service.get_stock_data(pos.symbol);
         const currentPrice = stockData.price;
-        const pnlPct = ((currentPrice - pos.entry_price) / pos.entry_price) * 100;
 
         const isEtf = ETF_WATCHLIST.some(e => e.symbol === pos.symbol);
         let shouldExit = false;
@@ -155,11 +139,9 @@ Value: ${currency} ${totalCost.toFixed(2)}
           await this.closePosition(pos, currentPrice, reason);
         } else if (isTargetHit) {
           if (isEtf) {
-            // For ETFs, we just alert on targets to let user decide on trailing
             logger.info(`[ExecutionAgent] ${pos.symbol} hit target ${currentPrice}, sending recommendation.`);
             await sendTelegramMessage(`🎯 *ETF TARGET HIT: ${pos.symbol}*\nPrice: $${currentPrice.toFixed(2)}\nAction: Recommended to take profit or set trailing stop.`, 'info');
           } else {
-            // For regular stocks, keep existing auto-close behavior
             await this.closePosition(pos, currentPrice, reason);
           }
         }
@@ -170,44 +152,38 @@ Value: ${currency} ${totalCost.toFixed(2)}
   }
 
   private async closePosition(pos: any, exitPrice: number, reason: string): Promise<void> {
-    const isHK = pos.symbol.endsWith('.HK') || /^\d+$/.test(pos.symbol);
-    const currency = isHK ? 'HKD' : 'USD';
+    const currency = 'USD';
     const proceeds = pos.qty * exitPrice;
     const pnl = proceeds - (pos.qty * pos.entry_price);
 
     logger.info(`[ExecutionAgent] Closing ${pos.symbol} at $${exitPrice} (${reason})`);
 
-    // Update virtual balance
     await query(`
-      UPDATE virtual_portfolio 
+      UPDATE virtual_portfolio
       SET current_balance = current_balance + $1, total_pnl = total_pnl + $2, updated_at = NOW()
       WHERE currency = $3
     `, [proceeds, pnl, currency]);
 
-    // Remove position
     await tradeStore.removePosition(pos.symbol, 'PAPER');
 
-    // Notify
     const message = `
 🏁 *POSITION CLOSED (Paper Mode)*
 Symbol: ${pos.symbol}
 Reason: ${reason}
 Exit Price: $${exitPrice.toFixed(2)}
-PnL: ${currency} ${pnl.toFixed(2)} (${((pnl / (pos.qty * pos.entry_price)) * 100).toFixed(2)}%)
+PnL: USD ${pnl.toFixed(2)} (${((pnl / (pos.qty * pos.entry_price)) * 100).toFixed(2)}%)
 ━━━━━━━━━━━━━━━━━━━━━━
     `.trim();
     await sendTelegramMessage(message, 'info');
 
-    // Remove from active_focus
     await query(`
       UPDATE active_focus SET status = 'CLOSED', removed_at = NOW()
       WHERE symbol = $1 AND status = 'ACTIVE'
     `, [pos.symbol.toUpperCase()]);
 
-    // Emit for AuditAgent
     eventBus.publish('executor:position_update', {
       symbol: pos.symbol,
-      pnl: pnl,
+      pnl,
       qty: pos.qty,
       entry_price: pos.entry_price,
       exit_price: exitPrice,

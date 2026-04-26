@@ -85,7 +85,6 @@ export const send_trade_execution = async (
 };
 
 const USD_TO_MYR = 4.72;
-const HKD_TO_MYR = 0.59;
 const SPEND_PER_TRADE_MYR = 40; // RM40 per trade (20% of RM200 budget)
 
 export const send_trade_signal = async (signal: {
@@ -107,9 +106,8 @@ export const send_trade_signal = async (signal: {
   if (!isBuy && !isSell) return false;
 
   const isScalp = signal.analysis?.includes("[SCALP ⚡]");
-  const isHK = signal.symbol.toUpperCase().endsWith('.HK') || /^\d{4,5}$/.test(signal.symbol);
-  const myrRate = isHK ? HKD_TO_MYR : USD_TO_MYR;
-  const priceCurrency = isHK ? "HK$" : "$";
+  const myrRate = USD_TO_MYR;
+  const priceCurrency = "$";
   const entry = signal.currentPrice;
 
   // Dynamic Stop/Target based on mode

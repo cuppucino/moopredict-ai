@@ -12,16 +12,25 @@ export class Scheduler {
   public static init(): void {
     logger.info("[Scheduler] Initializing MooPredict V4 automated agents...");
 
-    // 1. Team A: Intelligence Layer (Every hour during market windows)
-    this.tasks.push(cron.schedule("0 * * * 1-5", async () => {
-      const hour = new Date().getHours();
-      // Focus purely on US Trading Window (Approx. 20:00 - 05:00 HKT)
-      const isUSWindow = (hour >= 20 || hour <= 5);
+    // 1. Team A: Intelligence Layer (24/7 Session-Aware Scrape)
+    this.tasks.push(cron.schedule("0 * * * *", async () => {
+      const now = new Date();
+      const hour = now.getHours();
+      const day = now.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+      const isWeekend = (day === 0 || day === 6);
 
-      if (isUSWindow) {
+      // Full US session: pre-market (7am ET) through post-market (8pm ET)
+      // = 19:00 HKT through 08:00 HKT next day
+      const isUSSessionWindow = (hour >= 19 || hour <= 8);
+
+      // Weekends: run lighter — only at 09:00, 15:00, 21:00 HKT
+      const isWeekendSlot = isWeekend && (hour === 9 || hour === 15 || hour === 21);
+
+      if (isUSSessionWindow || isWeekendSlot) {
         try {
-          logger.info(`[Scheduler] V4 Team A: Starting intelligence scrape (Hour: ${hour})...`);
-          const newsBatch = await newsIntelAgent.scrapeBroadNews();
+          const context = isWeekend ? 'weekend' : 'standard';
+          logger.info(`[Scheduler] V4 Team A: Starting ${context} intelligence scrape (Hour: ${hour})...`);
+          const newsBatch = await newsIntelAgent.scrapeBroadNews(isWeekend ? 'weekend' : 'standard');
           const socialBatch = await socialIntelAgent.scrapeSocialIntel();
 
           eventBus.publish('intel:news_batch', newsBatch);
@@ -39,6 +48,15 @@ export class Scheduler {
           const watchlistBatch = await newsIntelAgent.scrapeWatchlistNews();
           if (watchlistBatch.headlines.length > 0) {
             eventBus.publish('intel:news_batch', watchlistBatch);
+
+            // On weekends, send a direct Telegram digest since the pipeline won't fire (market gated)
+            const day = new Date().getDay();
+            const isWeekend = (day === 0 || day === 6);
+            if (isWeekend) {
+              const lines = watchlistBatch.headlines.slice(0, 8).map((h: string) => `• ${h}`).join('\n');
+              const more = watchlistBatch.headlines.length > 8 ? `\n_...and ${watchlistBatch.headlines.length - 8} more_` : '';
+              await sendTelegramMessage(`👀 *Watchlist News (Weekend):*\n\n${lines}${more}`, 'info');
+            }
           }
         } catch (error) {
           logger.error("[Scheduler] Targeted scrape failed:", { error });
@@ -62,6 +80,32 @@ export class Scheduler {
     // 4. Team E: Weekly Report (08:00 Sat)
     this.tasks.push(cron.schedule("0 8 * * 6", async () => {
       eventBus.publish('system:weekly_report', {});
+    }));
+
+    // NEW: Post-Market Digest (08:00 HKT Mon-Fri = 4pm ET US Close)
+    this.tasks.push(cron.schedule("0 8 * * 1-5", async () => {
+      logger.info("[Scheduler] Post-market digest triggered (US market closed)");
+      try {
+        const newsBatch = await newsIntelAgent.scrapeBroadNews('post-market');
+        eventBus.publish('intel:news_batch', newsBatch);
+      } catch (error) {
+        logger.error("[Scheduler] Post-market digest failed:", { error });
+      }
+    }));
+
+    // NEW: Weekend Morning Digest (09:00 HKT Sat & Sun)
+    this.tasks.push(cron.schedule("0 9 * * 0,6", async () => {
+      logger.info("[Scheduler] Weekend digest triggered");
+      try {
+        const newsBatch = await newsIntelAgent.scrapeBroadNews('weekend');
+        if (newsBatch.headlines.length === 0) {
+          await sendTelegramMessage("🗞️ *Weekend Brief:* No new major headlines since last check. Markets are quiet.", "info");
+        } else {
+          eventBus.publish('intel:news_batch', newsBatch);
+        }
+      } catch (error) {
+        logger.error("[Scheduler] Weekend digest failed:", { error });
+      }
     }));
 
     // 5. Market Reminders & Intelligence Summaries

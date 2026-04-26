@@ -29,7 +29,6 @@ export class ReportAgent {
     try {
       // 1. Fetch Virtual Portfolio Stats
       const portfolios = await query('SELECT * FROM virtual_portfolio');
-      const hkd = portfolios.rows.find((r: any) => r.currency === 'HKD');
       const usd = portfolios.rows.find((r: any) => r.currency === 'USD');
 
       // 2. Fetch Recent Audit Logs (Today)
@@ -39,7 +38,7 @@ export class ReportAgent {
       `);
 
       // 3. AI Lesson from Performance
-      const lesson = await ollamaService.analyzeHKDailyPerformance(
+      const lesson = await ollamaService.analyzeDailyPerformance(
         auditLogs.rows.filter((l: any) => l.was_accurate),
         auditLogs.rows.filter((l: any) => !l.was_accurate)
       );
@@ -48,9 +47,8 @@ export class ReportAgent {
       const message = `
 📊 *MOOPREDICT DAILY PERFORMANCE*
 ━━━━━━━━━━━━━━━━━━━━━━
-💰 *Virtual Balances:*
-• HKD: ${hkd.current_balance.toLocaleString()} (${hkd.total_pnl >= 0 ? '+' : ''}${hkd.total_pnl.toLocaleString()})
-• USD: ${usd.current_balance.toLocaleString()} (${usd.total_pnl >= 0 ? '+' : ''}${usd.total_pnl.toLocaleString()})
+💰 *Virtual Balance (USD):*
+• Balance: $${usd?.current_balance?.toLocaleString() ?? '0'} (${(usd?.total_pnl ?? 0) >= 0 ? '+' : ''}${usd?.total_pnl?.toLocaleString() ?? '0'})
 
 💹 *Today's Activity:*
 • Trades Closed: ${auditLogs.rowCount}

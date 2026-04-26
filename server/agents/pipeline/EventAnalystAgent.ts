@@ -85,7 +85,7 @@ export class EventAnalystAgent {
   private async discoverOpportunities(headlines: string[]): Promise<Opportunity[]> {
     // 0. Fetch the user's watchlist to guide the AI
     const watchlistResult = await query("SELECT symbol FROM user_watchlist");
-    const watchlist = watchlistResult.rows.map(r => r.symbol).join(', ');
+    const watchlist = watchlistResult.rows.map((r: any) => r.symbol).join(', ');
 
     // We send headlines in batches to avoid overwhelming the LLM and to provide context
     const batchSize = 15;
@@ -94,7 +94,7 @@ export class EventAnalystAgent {
     for (let i = 0; i < headlines.length; i += batchSize) {
       const batch = headlines.slice(i, i + batchSize);
       const prompt = `
-        As a senior stock analyst, analyze these headlines and identify which publicly traded stocks (US or HK) are directly or indirectly affected.
+        As a senior stock analyst, analyze these headlines and identify which publicly traded US stocks are directly or indirectly affected.
         
         USER WATCHLIST (Prioritize these if relevant):
         ${watchlist || "None configured"}
@@ -106,7 +106,7 @@ export class EventAnalystAgent {
         IMPORTANT: If a headline mentions a theme related to a stock in the USER WATCHLIST, prioritize creating an opportunity for that stock.
         
         For each affected stock, provide:
-        - symbol (Ticker e.g. AAPL, 0700.HK)
+        - symbol (Ticker e.g. AAPL, NVDA, TSLA)
         - reason (Why is it affected? Indirect links are okay)
         - catalyst_type (EARNINGS | PRODUCT | REGULATION | MACRO | SOCIAL)
         - direction (BULLISH | BEARISH | NEUTRAL)

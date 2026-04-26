@@ -1,14 +1,10 @@
 import Parser from 'rss-parser';
 import { query } from '../../db/postgres';
-import axios from 'axios';
-import * as cheerio from 'cheerio';
 
 import { logger } from '../../core/Logger';
 import { sendTelegramMessage } from '../../services/telegramService';
 import { v4 as uuidv4 } from 'uuid';
-import { createRequire } from "module";
-const _require = createRequire(import.meta.url);
-const yahooFinance = _require("yahoo-finance2").default;
+
 export interface NewsIntelBatch {
   correlation_id: string;
   timestamp: string | Date;
@@ -19,9 +15,13 @@ export interface NewsIntelBatch {
 export class NewsIntelAgent {
   private parser: Parser;
   private sources = [
-    { name: 'Yahoo Finance RSS', url: 'https://finance.yahoo.com/news/rss' },
-    { name: 'Google News', url: 'https://news.google.com/rss/search?q=US+stock+market+when:2h' },
-    { name: 'MarketWatch', url: 'https://www.marketwatch.com/rss/topstories' }
+    { name: 'BBC Business',    url: 'http://feeds.bbci.co.uk/news/business/rss.xml' },
+    { name: 'Reuters Business', url: 'https://feeds.reuters.com/reuters/businessNews' },
+    { name: 'CNBC Markets',    url: 'https://www.cnbc.com/id/100003114/device/rss/rss.html' },
+    { name: 'CNBC Economy',    url: 'https://www.cnbc.com/id/20910258/device/rss/rss.html' },
+    { name: 'MarketWatch',     url: 'https://www.marketwatch.com/rss/topstories' },
+    { name: 'Investing.com',   url: 'https://www.investing.com/rss/news.rss' },
+    { name: 'Google News',     url: 'https://news.google.com/rss/search?q=US+stock+market&hl=en-US&gl=US&ceid=US:en' },
   ];
 
   constructor() {
@@ -31,8 +31,8 @@ export class NewsIntelAgent {
   /**
    * Scrapes all broad news sources
    */
-  public async scrapeBroadNews(): Promise<NewsIntelBatch> {
-    logger.info('[NewsIntelAgent] Starting broad news scrape...');
+  public async scrapeBroadNews(mode: 'standard' | 'post-market' | 'weekend' = 'standard'): Promise<NewsIntelBatch> {
+    logger.info(`[NewsIntelAgent] Starting ${mode} broad news scrape...`);
     const allArticles: any[] = [];
     const headlines: string[] = [];
 
@@ -62,29 +62,6 @@ export class NewsIntelAgent {
       }
     }
 
-    // Modern Fallback: Yahoo Finance Search for broad trends
-    try {
-      logger.info(`[NewsIntelAgent] Scraping Yahoo Finance Search for broad trends...`);
-      const searchTerms = ['stock market news', 'financial market trends', 'breaking economy news'];
-      for (const term of searchTerms) {
-        const result: any = await yahooFinance.search(term, { newsCount: 5, quotesCount: 0 });
-        const newsItems = result.news || [];
-        
-        for (const item of newsItems) {
-          allArticles.push({
-            headline: item.title,
-            summary: item.title,
-            source: 'Yahoo Search',
-            url: item.link,
-            scraped_at: new Date()
-          });
-          headlines.push(item.title);
-        }
-      }
-    } catch (error) {
-      logger.error(`[NewsIntelAgent] Yahoo Search scrape failed:`, { error });
-    }
-
     // Final safety cap: 100 articles total per batch
     const limitedArticles = allArticles.slice(0, 100);
 
@@ -94,7 +71,7 @@ export class NewsIntelAgent {
     logger.info(`[NewsIntelAgent] Scrape complete. Found ${uniqueArticles.length} unique articles.`);
     
     if (uniqueArticles.length > 0) {
-      await this.sendRecap(uniqueArticles);
+      await this.sendRecap(uniqueArticles, mode);
     }
     
     return {
@@ -122,28 +99,28 @@ export class NewsIntelAgent {
     const allArticles: any[] = [];
     const headlines: string[] = [];
 
-    // For each symbol, fetch the latest news from Yahoo Finance
+    // Use Google News RSS per symbol — rate-limit free, same parser as broad scrape
     for (const symbol of symbols) {
       try {
-        // Add a small delay to avoid rate limiting
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        
-        logger.info(`[NewsIntelAgent] Fetching targeted news for ${symbol}...`);
-        const result: any = await yahooFinance.search(symbol, { newsCount: 3, quotesCount: 0 });
-        const newsItems = result.news || [];
-        
-        for (const item of newsItems) {
+        const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(symbol)}+stock&hl=en-US&gl=US&ceid=US:en`;
+        logger.info(`[NewsIntelAgent] Fetching targeted news for ${symbol} via RSS...`);
+
+        const feed = await this.parser.parseURL(rssUrl);
+        const items = feed.items.slice(0, 5);
+
+        for (const item of items) {
+          if (!item.title || !item.link) continue;
           allArticles.push({
             headline: `[${symbol}] ${item.title}`,
-            summary: item.title,
-            source: 'Targeted Search',
+            summary: item.contentSnippet || item.title,
+            source: 'Google News RSS',
             url: item.link,
             scraped_at: new Date()
           });
           headlines.push(`[${symbol}] ${item.title}`);
         }
-      } catch (error) {
-        logger.error(`[NewsIntelAgent] Targeted scrape failed for ${symbol}:`, { error });
+      } catch (error: any) {
+        logger.error(`[NewsIntelAgent] Targeted scrape failed for ${symbol}:`, { error: error.message });
       }
     }
 
@@ -195,7 +172,7 @@ export class NewsIntelAgent {
   /**
    * Sends a summary of newly scraped articles to Telegram
    */
-  private async sendRecap(articles: any[]): Promise<void> {
+  private async sendRecap(articles: any[], mode: 'standard' | 'post-market' | 'weekend' = 'standard'): Promise<void> {
     try {
       const grouped: { [source: string]: string[] } = {};
       for (const a of articles) {
@@ -203,7 +180,11 @@ export class NewsIntelAgent {
         grouped[a.source].push(a.headline);
       }
 
-      let message = `📰 *Hourly News Found:*\n\n`;
+      let header = '📰 *Hourly News Found:*';
+      if (mode === 'post-market') header = '🌆 *Post-Market Digest (US Close)*';
+      if (mode === 'weekend') header = '🗞️ *Weekend Market Brief*';
+
+      let message = `${header}\n\n`;
       let count = 1;
       for (const source in grouped) {
         message += `${count}. [${source}]\n`;
@@ -217,6 +198,12 @@ export class NewsIntelAgent {
         }
         message += `\n`;
         count++;
+      }
+
+      if (mode === 'post-market') {
+        const day = new Date().getDay(); // 0=Sun, 1=Mon, ..., 5=Fri
+        const nextOpen = (day === 5) ? 'Monday' : 'tomorrow';
+        message += `\n_Market closed. Next open: ${nextOpen} 9:30am ET._`;
       }
 
       await sendTelegramMessage(message.trim(), 'info');

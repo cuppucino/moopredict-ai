@@ -28,9 +28,7 @@ const ConfigSchema = z.object({
   OPENCLAW_WEBHOOK_URL: z.string().url().default('http://localhost:18789/webhook'),
 
   // --- Market Config ---
-  // HK market hours: 9:30-12:00 & 13:00-16:00 HKT (UTC+8)
-  // In UTC: 01:30-04:00 & 05:00-08:00
-  TRADE_MARKET: z.enum(['HK', 'US']).default('US'),
+  TRADE_MARKET: z.enum(['US']).default('US'),
   TRADE_CURRENCY: z.string().default('USD'),
 
   // --- Trading Thresholds ---

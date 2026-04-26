@@ -119,8 +119,13 @@ async function markSent(id) {
 
 // ── Poll loop ──────────────────────────────────────────────────────────────
 let consecutiveErrors = 0;
+let isPolling = false;
 
 async function poll() {
+  // Prevent concurrent executions stacking up if the server is slow
+  if (isPolling) return;
+  isPolling = true;
+
   try {
     const pending = await apiFetch("/api/notifications/pending");
     consecutiveErrors = 0;
@@ -143,6 +148,8 @@ async function poll() {
     if (consecutiveErrors === 1 || consecutiveErrors % 12 === 0) {
       console.warn(`[${new Date().toLocaleTimeString()}] ⚠️  Server unreachable: ${err.message}`);
     }
+  } finally {
+    isPolling = false;
   }
 }
 

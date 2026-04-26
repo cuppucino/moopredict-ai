@@ -25,7 +25,6 @@ interface ViralAlert {
 export class SocialService {
   private isRunning = false;
   private readonly US_SUBREDDITS = ['wallstreetbets', 'stocks', 'investing', 'StockMarket', 'securityanalysis'];
-  private readonly ASIA_SUBREDDITS = ['HKStocks', 'Bursa', 'singaporefi', 'asx', 'ChineseStocks'];
   
   // Hourly Stat Tracking
   private hourlyStats = {
@@ -43,8 +42,7 @@ export class SocialService {
     const mentions: SocialMention[] = [];
     const tickerPattern = new RegExp(`\\$?${symbol}\\b`, 'i');
 
-    const isHK = /^\d+$/.test(symbol) || symbol.toUpperCase().endsWith('.HK');
-    const subreddits = isHK ? this.ASIA_SUBREDDITS : this.US_SUBREDDITS;
+    const subreddits = this.US_SUBREDDITS;
 
     for (const subreddit of subreddits) {
       try {
@@ -95,8 +93,7 @@ export class SocialService {
   public async fetchStockTwitsMentions(symbol: string): Promise<SocialMention[]> {
     const mentions: SocialMention[] = [];
     try {
-      // StockTwits uses 0700.HK format for HK
-      const stSymbol = /^\d+$/.test(symbol) ? `${symbol}.HK` : symbol.toUpperCase();
+      const stSymbol = symbol.toUpperCase();
       const url = `https://api.stocktwits.com/api/2/streams/symbol/${stSymbol}.json`;
       
       const response = await axios.get(url, { timeout: 10000 });

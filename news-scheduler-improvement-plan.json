@@ -1,0 +1,378 @@
+{
+  "plan": "News Coverage & Scheduler Improvements — 24/7 Intelligence Layer",
+  "version": "1.0",
+  "motivation": "The current scheduler only runs news scraping on weekdays (Mon-Fri) and only during the live US market window (20:00-05:00 HKT). This means the system is completely silent on weekends, misses post-market moves (4pm-8pm ET = 04:00-08:00 HKT), and ignores pre-market developments. Financial news is continuous — macro events, geopolitical shocks, analyst upgrades, earnings surprises, and Fed commentary can all land on a Saturday and move Monday's open by 3-5%. This plan extends the intelligence layer to true 24/7 coverage with smarter session-aware scheduling.",
+
+  "time_zone_reference": {
+    "HKT": "UTC+8 (system local time, used for cron expressions)",
+    "ET_EDT": "UTC-4 (US Eastern Daylight Time, active now — April through November)",
+    "ET_EST": "UTC-5 (US Eastern Standard Time — December through March)",
+    "conversions": {
+      "US_premarket_start_7am_ET": "19:00 HKT",
+      "US_market_open_9_30am_ET": "21:30 HKT",
+      "US_market_close_4pm_ET":   "04:00 HKT (next calendar day)",
+      "US_postmarket_end_8pm_ET": "08:00 HKT (next calendar day)",
+      "note": "All cron times below are in HKT"
+    }
+  },
+
+  "current_problems": [
+    {
+      "id": "P1",
+      "title": "Broad news scrape is weekday-only",
+      "file": "server/services/scheduler.ts",
+      "line": 16,
+      "current_cron": "0 * * * 1-5",
+      "impact": "Zero news processed on Saturday and Sunday. Weekend macro/geopolitical/earnings-preview news is completely ignored, leaving Monday's open blind."
+    },
+    {
+      "id": "P2",
+      "title": "US window excludes post-market",
+      "file": "server/services/scheduler.ts",
+      "line": 19,
+      "current_check": "const isUSWindow = (hour >= 20 || hour <= 5)",
+      "impact": "Post-market (04:00-08:00 HKT) is not covered. After-hours earnings, Fed commentary, and analyst upgrades/downgrades that land after 4pm ET are never scraped until the next cycle — if at all."
+    },
+    {
+      "id": "P3",
+      "title": "No dedicated post-market notification",
+      "file": "server/services/scheduler.ts",
+      "impact": "After US close there is no summary pushed to Telegram. The user has no awareness of what happened after 4pm ET until the next morning."
+    },
+    {
+      "id": "P4",
+      "title": "No weekend intelligence digest",
+      "file": "server/services/scheduler.ts",
+      "impact": "The system is fully silent Saturday and Sunday. Weekend Telegram is dead. User has no way to passively stay informed unless they manually send !scrape."
+    },
+    {
+      "id": "P5",
+      "title": "Watchlist scrape (30-min) has no Telegram output on weekends",
+      "file": "server/services/scheduler.ts",
+      "line": 36,
+      "impact": "The 30-min watchlist scrape runs every day (no 1-5 filter) but only publishes to the event bus if new articles are found. Because the broad scrape hasn't run to seed the DB on weekends, deduplication means almost nothing gets through. No Telegram message is ever sent from this task on weekends."
+    }
+  ],
+
+  "phases": [
+    {
+      "id": 1,
+      "title": "Expand broad news scrape to 7 days with post-market coverage",
+      "priority": "HIGH",
+      "files": ["server/services/scheduler.ts"],
+      "problem_refs": ["P1", "P2"],
+
+      "change": {
+        "description": "Remove the 1-5 weekday restriction from Task 1 (Broad News). Update the internal window check to cover the full US session including pre-market and post-market. On weekends, use a lighter 4-hourly slot check instead of running every single hour.",
+        "cron_before": "0 * * * 1-5",
+        "cron_after":  "0 * * * *",
+
+        "window_logic_before": {
+          "code": "const isUSWindow = (hour >= 20 || hour <= 5);",
+          "coverage_HKT": "20:00 to 05:00",
+          "coverage_ET":  "08:00pm to 05:00pm (market hours only, no pre/post)"
+        },
+
+        "window_logic_after": {
+          "code": [
+            "const day = new Date().getDay(); // 0=Sun, 1=Mon, ..., 6=Sat",
+            "const isWeekend = day === 0 || day === 6;",
+            "",
+            "// Full US session: pre-market (7am ET) through post-market (8pm ET)",
+            "// = 19:00 HKT through 08:00 HKT next day",
+            "const isUSSessionWindow = hour >= 19 || hour <= 8;",
+            "",
+            "// Weekends: run lighter — only at 09:00, 15:00, 21:00 HKT (3x per day)",
+            "const isWeekendSlot = isWeekend && (hour === 9 || hour === 15 || hour === 21);",
+            "",
+            "if (!isUSSessionWindow && !isWeekendSlot) return;"
+          ],
+          "coverage_weekday_HKT": "19:00 to 08:00 (13-hour window: pre-market + market + post-market)",
+          "coverage_weekend_HKT": "09:00, 15:00, 21:00 (3 digest points)",
+          "note": "Weekend slots are deliberately sparse — financial news volume drops 80% on weekends, so hourly is wasteful and produces duplicate batches"
+        }
+      }
+    },
+
+    {
+      "id": 2,
+      "title": "Add post-market close digest (Mon-Fri, 08:00 HKT = 4pm ET)",
+      "priority": "HIGH",
+      "files": ["server/services/scheduler.ts", "server/agents/pipeline/NewsIntelAgent.ts"],
+      "problem_refs": ["P3"],
+
+      "scheduler_change": {
+        "description": "Add a new cron task that fires at 08:00 HKT Mon-Fri (exactly when US market closes at 4pm ET). It triggers a fresh broad scrape and sends a post-market digest to Telegram.",
+        "cron": "0 8 * * 1-5",
+        "fires_at_ET": "4:00 PM ET (US market close)",
+        "code": [
+          "this.tasks.push(cron.schedule('0 8 * * 1-5', async () => {",
+          "  logger.info('[Scheduler] Post-market digest triggered (US market closed)');",
+          "  try {",
+          "    const newsBatch = await newsIntelAgent.scrapeBroadNews('post-market');",
+          "    eventBus.publish('intel:news_batch', newsBatch);",
+          "  } catch (error) {",
+          "    logger.error('[Scheduler] Post-market digest failed:', { error });",
+          "  }",
+          "}));"
+        ]
+      },
+
+      "news_agent_change": {
+        "description": "Add an optional mode parameter to scrapeBroadNews() so it can pass a digest type to sendRecap(). This controls the message header and tone.",
+        "signature_before": "public async scrapeBroadNews(): Promise<NewsIntelBatch>",
+        "signature_after":  "public async scrapeBroadNews(mode: 'standard' | 'post-market' | 'weekend' = 'standard'): Promise<NewsIntelBatch>",
+        "pass_mode_to_sendRecap": "await this.sendRecap(uniqueArticles, mode);",
+        "sendRecap_signature_after": "private async sendRecap(articles: any[], mode: 'standard' | 'post-market' | 'weekend' = 'standard'): Promise<void>",
+        "message_headers": {
+          "standard":     "📰 *Hourly News Recap*",
+          "post-market":  "🌆 *Post-Market Digest (US Close)*",
+          "weekend":      "🗞️ *Weekend Market Brief*"
+        },
+        "post_market_extra_line": "Appended below the headlines: _Market closed. Next open: {nextOpenDay} 9:30am ET._"
+      }
+    },
+
+    {
+      "id": 3,
+      "title": "Add weekend morning digest (09:00 HKT Sat & Sun)",
+      "priority": "MEDIUM",
+      "files": ["server/services/scheduler.ts"],
+      "problem_refs": ["P4"],
+
+      "scheduler_change": {
+        "description": "Add a weekend digest cron that fires at 09:00 HKT on Saturday and Sunday. Uses scrapeBroadNews('weekend') so the message is clearly labelled as a weekend brief and not confused with a live trading alert.",
+        "cron": "0 9 * * 0,6",
+        "fires_at_HKT": "9:00 AM Saturday and Sunday",
+        "context": "9am HKT Saturday = 9pm ET Friday (after any late US post-market news settles). 9am HKT Sunday = catches any weekend macro/geopolitical developments.",
+        "code": [
+          "this.tasks.push(cron.schedule('0 9 * * 0,6', async () => {",
+          "  logger.info('[Scheduler] Weekend digest triggered');",
+          "  try {",
+          "    const newsBatch = await newsIntelAgent.scrapeBroadNews('weekend');",
+          "    if (newsBatch.headlines.length > 0) {",
+          "      eventBus.publish('intel:news_batch', newsBatch);",
+          "    } else {",
+          "      await sendTelegramMessage('🗞️ *Weekend Brief:* No new major headlines since last check. Markets are quiet.', 'info');",
+          "    }",
+          "  } catch (error) {",
+          "    logger.error('[Scheduler] Weekend digest failed:', { error });",
+          "  }",
+          "}));"
+        ]
+      }
+    },
+
+    {
+      "id": 4,
+      "title": "Fix watchlist scrape to send Telegram on weekends when new articles found",
+      "priority": "MEDIUM",
+      "files": ["server/services/scheduler.ts"],
+      "problem_refs": ["P5"],
+
+      "change": {
+        "description": "The watchlist scrape publishes to the event bus, but on weekends the StrategyAgent and ExecutionAgent are gated by market hours and won't act on it. Add a direct Telegram notification path for weekends so the user at least knows what news hit their watchlist stocks.",
+        "current_code": [
+          "if (watchlistBatch.headlines.length > 0) {",
+          "  eventBus.publish('intel:news_batch', watchlistBatch);",
+          "}"
+        ],
+        "new_code": [
+          "if (watchlistBatch.headlines.length > 0) {",
+          "  eventBus.publish('intel:news_batch', watchlistBatch);",
+          "",
+          "  // On weekends, the event bus pipeline won't fire (market gated).",
+          "  // Send a direct Telegram digest so the user stays informed.",
+          "  const day = new Date().getDay();",
+          "  const isWeekend = day === 0 || day === 6;",
+          "  if (isWeekend) {",
+          "    const lines = watchlistBatch.headlines.slice(0, 8).map((h: string) => `• ${h}`).join('\\n');",
+          "    const more = watchlistBatch.headlines.length > 8 ? `\\n_...and ${watchlistBatch.headlines.length - 8} more_` : '';",
+          "    await sendTelegramMessage(`👀 *Watchlist News (Weekend):*\\n\\n${lines}${more}`, 'info');",
+          "  }",
+          "}"
+        ],
+        "cap": "Capped at 8 headlines to keep the Telegram message readable. Full list is still stored in news_intel table."
+      }
+    }
+  ],
+
+  "full_scheduler_after": {
+    "description": "Complete view of all scheduler tasks after all phases are applied",
+    "tasks": [
+      {
+        "label": "Team A — Broad News (24/7, session-aware)",
+        "cron": "0 * * * *",
+        "days": "Every day",
+        "logic": "Runs every hour but skips if outside US session window (19:00-08:00 HKT) on weekdays, OR outside weekend slots (09:00, 15:00, 21:00 HKT) on weekends"
+      },
+      {
+        "label": "Team A — Watchlist News (30-min)",
+        "cron": "*/30 * * * *",
+        "days": "Every day",
+        "logic": "Unchanged cadence. Now sends direct Telegram on weekends if new articles found."
+      },
+      {
+        "label": "Team D — Position Monitor",
+        "cron": "*/15 * * * 1-5",
+        "days": "Mon-Fri only",
+        "logic": "No change — positions only exist during live market days"
+      },
+      {
+        "label": "Team E — Daily Report",
+        "cron": "5 17 * * 1-5",
+        "days": "Mon-Fri only",
+        "logic": "No change"
+      },
+      {
+        "label": "Team E — Weekly Report",
+        "cron": "0 8 * * 6",
+        "days": "Saturday only",
+        "logic": "No change"
+      },
+      {
+        "label": "NEW — Post-Market Digest",
+        "cron": "0 8 * * 1-5",
+        "days": "Mon-Fri only",
+        "fires_at": "08:00 HKT = 4:00 PM ET (US market close)",
+        "logic": "Scrapes news and sends 🌆 Post-Market Digest message to Telegram"
+      },
+      {
+        "label": "NEW — Weekend Morning Digest",
+        "cron": "0 9 * * 0,6",
+        "days": "Saturday and Sunday",
+        "fires_at": "09:00 HKT",
+        "logic": "Scrapes news and sends 🗞️ Weekend Market Brief to Telegram. Sends a 'markets quiet' message if nothing new found."
+      },
+      {
+        "label": "Market Reminder — US Intel Report (21:15 HKT)",
+        "cron": "15 21 * * 1-5",
+        "days": "Mon-Fri only",
+        "logic": "No change"
+      },
+      {
+        "label": "Market Reminder — US Market Opening Soon (21:20 HKT)",
+        "cron": "20 21 * * 1-5",
+        "days": "Mon-Fri only",
+        "logic": "No change"
+      },
+      {
+        "label": "ETF — Pre-market scan (20:00 HKT)",
+        "cron": "0 20 * * 1-5",
+        "days": "Mon-Fri only",
+        "logic": "No change"
+      },
+      {
+        "label": "ETF — Intraday scans",
+        "cron": "0 10,14,22,1 * * 1-5",
+        "days": "Mon-Fri only",
+        "logic": "No change"
+      },
+      {
+        "label": "ETF — Morning Briefing (20:30 HKT)",
+        "cron": "30 20 * * 1-5",
+        "days": "Mon-Fri only",
+        "logic": "No change"
+      }
+    ]
+  },
+
+  "telegram_message_examples": {
+    "post_market_digest": "🌆 *Post-Market Digest (US Close)*\n\n1. [Yahoo Finance RSS]\n- NVIDIA beats Q1 estimates, shares up 4% after hours\n- Fed minutes signal no rate cuts before September\n\n2. [Google News]\n- Apple suppliers report strong iPhone demand in Asia\n...and 3 more\n\n_Market closed. Next open: Monday 9:30am ET._",
+    "weekend_digest": "🗞️ *Weekend Market Brief*\n\n1. [Yahoo Finance RSS]\n- Tariff negotiations resume between US and China\n- Oil prices drop on surprise OPEC output increase\n\n2. [Yahoo Search]\n- Tech sector faces regulatory headwinds in EU\n...and 5 more",
+    "weekend_watchlist": "👀 *Watchlist News (Weekend):*\n\n• [NVDA] Jensen Huang hints at next-gen GPU at Taiwan event\n• [AAPL] Apple to hold special event next Tuesday\n• [TSLA] Tesla Q2 delivery estimates revised upward by analysts\n_...and 2 more_",
+    "quiet_weekend": "🗞️ *Weekend Brief:* No new major headlines since last check. Markets are quiet."
+  },
+
+  "execution_order": [
+    {
+      "step": 1,
+      "phase": 1,
+      "action": "Update Task 1 cron from '0 * * * 1-5' to '0 * * * *' and replace the isUSWindow check with the new session-aware + weekend slot logic in scheduler.ts",
+      "reason": "Biggest coverage gap — weekday-only news is the core problem. This alone fixes weekends and post-market.",
+      "estimated_lines_changed": 8
+    },
+    {
+      "step": 2,
+      "phase": 2,
+      "action": "Add mode parameter to scrapeBroadNews() and sendRecap() in NewsIntelAgent.ts. Update sendRecap() to use the correct header per mode.",
+      "reason": "Required for steps 3 and 4 — the digest tasks need mode-aware message formatting",
+      "estimated_lines_changed": 15
+    },
+    {
+      "step": 3,
+      "phase": 2,
+      "action": "Add post-market digest cron ('0 8 * * 1-5') to scheduler.ts",
+      "reason": "Dedicated notification at US close — after step 2 so the message format is ready",
+      "estimated_lines_changed": 10
+    },
+    {
+      "step": 4,
+      "phase": 3,
+      "action": "Add weekend morning digest cron ('0 9 * * 0,6') to scheduler.ts",
+      "reason": "Weekend awareness — after step 2 so the message format is ready",
+      "estimated_lines_changed": 10
+    },
+    {
+      "step": 5,
+      "phase": 4,
+      "action": "Update watchlist scrape block in scheduler.ts to send direct Telegram on weekends",
+      "reason": "Last — simplest change, no new agent methods needed",
+      "estimated_lines_changed": 10
+    }
+  ],
+
+  "files_to_touch": [
+    {
+      "file": "server/services/scheduler.ts",
+      "changes": [
+        "Task 1 cron: '0 * * * 1-5' → '0 * * * *'",
+        "Task 1 window logic: isUSWindow → isUSSessionWindow + isWeekendSlot",
+        "Task 2 (watchlist): add weekend direct Telegram block",
+        "New cron: post-market digest at '0 8 * * 1-5'",
+        "New cron: weekend morning digest at '0 9 * * 0,6'"
+      ]
+    },
+    {
+      "file": "server/agents/pipeline/NewsIntelAgent.ts",
+      "changes": [
+        "scrapeBroadNews(mode = 'standard'): add mode param, pass to sendRecap",
+        "sendRecap(articles, mode = 'standard'): switch message header by mode",
+        "Post-market mode: append next open day line at bottom of message"
+      ]
+    }
+  ],
+
+  "out_of_scope": {
+    "reason": "Deferred to keep this plan focused on scheduling and coverage, not new data sources",
+    "excluded": [
+      "Pre-market level 2 / dark pool data — requires separate paid data feed",
+      "Earnings calendar integration — useful but separate module, not a scheduler fix",
+      "Social scrape on weekends — SocialIntelAgent already runs on demand via !scrape, extending it to weekends risks Reddit/X rate limits",
+      "Real-time WebSocket news feed — would replace RSS polling entirely, separate architecture decision"
+    ]
+  },
+
+  "risks": [
+    {
+      "risk": "Duplicate articles on weekends",
+      "severity": "LOW",
+      "mitigation": "deduplicateAndStore() already uses ON CONFLICT (url) DO NOTHING — duplicates are silently dropped at DB level. Weekend quiet message handles the case where nothing new is found."
+    },
+    {
+      "risk": "Post-market digest fires at same time as weekly report on Friday (08:00 HKT)",
+      "severity": "LOW",
+      "mitigation": "Weekly report fires at '0 8 * * 6' (Saturday). Post-market digest fires at '0 8 * * 1-5' (Mon-Fri). No overlap — Saturday is excluded from 1-5."
+    },
+    {
+      "risk": "Weekend news scrape hits Yahoo Finance rate limits",
+      "severity": "LOW",
+      "mitigation": "Broad scrape uses RSS feeds (Yahoo Finance RSS, Google News RSS, MarketWatch RSS) which are not rate-limited. Yahoo Finance Search fallback is already wrapped in try/catch — a failure here skips that source without crashing."
+    },
+    {
+      "risk": "More frequent Telegram messages could feel noisy",
+      "severity": "MEDIUM",
+      "mitigation": "Weekend slots are 3x/day max (09:00, 15:00, 21:00 HKT). Post-market is 1x/day. Only sends if new articles are found — quiet market = quiet bot. The 'markets quiet' fallback message on weekends provides reassurance without false signals."
+    }
+  ]
+}

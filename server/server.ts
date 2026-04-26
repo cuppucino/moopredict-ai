@@ -333,14 +333,12 @@ app.post("/webhook", localOnly, async (req: Request, res: Response) => {
         Promise.resolve(Scheduler.getStatus()),
       ]);
 
-      const hkd = portfolio.rows.find((r: any) => r.currency === "HKD");
       const usd = portfolio.rows.find((r: any) => r.currency === "USD");
 
       return res.json({
         content:
           `🤖 MooPredict V4 — PAPER MODE\n` +
           `──────────────────────────\n` +
-          `HKD Balance: $${parseFloat(hkd?.current_balance || 0).toLocaleString()} (PnL: ${parseFloat(hkd?.total_pnl || 0) >= 0 ? "+" : ""}${parseFloat(hkd?.total_pnl || 0).toFixed(2)})\n` +
           `USD Balance: $${parseFloat(usd?.current_balance || 0).toLocaleString()} (PnL: ${parseFloat(usd?.total_pnl || 0) >= 0 ? "+" : ""}${parseFloat(usd?.total_pnl || 0).toFixed(2)})\n` +
           `Open Positions: ${positions.length}/6\n` +
           `Scheduler Tasks: ${scheduler.active} active`,
@@ -454,6 +452,54 @@ app.post("/webhook", localOnly, async (req: Request, res: Response) => {
       return res.json({ content: "⏳ Fetching live positions from Moomoo... One moment." });
     }
 
+    if (command === "!checkstatus") {
+      logger.info("[Webhook] !checkstatus triggered via Telegram");
+      (async () => {
+        const { sendTelegramMessage } = await import("./services/telegramService");
+        try {
+          const [positions, balance] = await Promise.all([
+            futu_service.get_real_positions(),
+            futu_service.get_account_balance(),
+          ]);
+
+          const now = new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+          const totalUnrealized = positions.reduce((sum: number, p: any) => sum + Number(p.pnl || 0), 0);
+          const totalSign = totalUnrealized >= 0 ? "+" : "";
+
+          let msg = `📊 *Live Account Status*\n`;
+          msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+          msg += `💼 *Balance (${balance.currency})*\n`;
+          msg += `Total Assets: $${Number(balance.total_assets).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+          msg += `Available Cash: $${Number(balance.available_cash).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n\n`;
+
+          if (positions.length === 0) {
+            msg += `📭 *No open positions*\n`;
+          } else {
+            msg += `📈 *Open Positions (${positions.length})*\n`;
+            for (const p of positions) {
+              const pnl = Number(p.pnl || 0);
+              const pnlPct = typeof p.pnl_pct === "number" ? p.pnl_pct * 100 : 0;
+              const sign = pnl >= 0 ? "+" : "";
+              const icon = pnl >= 0 ? "✅" : "🔴";
+              msg += `\n▸ *${p.symbol}* [${p.market}]\n`;
+              msg += `  Qty: ${p.qty} | Avg: $${Number(p.avg_price).toFixed(2)} | Now: $${Number(p.current_price).toFixed(2)}\n`;
+              msg += `  P&L: ${sign}$${pnl.toFixed(2)} (${sign}${pnlPct.toFixed(2)}%) ${icon}\n`;
+            }
+            msg += `\n━━━━━━━━━━━━━━━━━━━━\n`;
+            msg += `📊 Total Unrealized: ${totalSign}$${totalUnrealized.toFixed(2)}\n`;
+          }
+
+          msg += `🕐 Updated: ${now}`;
+          await sendTelegramMessage(msg);
+        } catch (e: any) {
+          logger.error("[Webhook] !checkstatus failed:", { error: e.message });
+          const { sendTelegramMessage } = await import("./services/telegramService");
+          await sendTelegramMessage("⚠️ Could not fetch status. Check that Moomoo OpenD is running.");
+        }
+      })();
+      return res.json({ content: "⏳ Fetching live status from Moomoo..." });
+    }
+
     if (command === "!accounts") {
       const accs = futu_service.get_all_accounts();
       const lines = accs.map((a: any) => 
@@ -462,7 +508,7 @@ app.post("/webhook", localOnly, async (req: Request, res: Response) => {
       return res.json({ content: `🏦 *Discovered Accounts:* \n${lines}\n\n*Note:* If your Universal Account (3378) is not listed, please check your FutuOpenD login.` });
     }
 
-    res.json({ content: "Commands: !status, !positions, !syncpos, !accounts, !focus, !pnl, !scrape, !etf, !testbuy, !sync" });
+    res.json({ content: "Commands: !checkstatus, !status, !positions, !syncpos, !accounts, !focus, !pnl, !scrape, !etf, !testbuy, !sync" });
   } catch (e: any) {
     logger.error("[Webhook] Error:", { error: e.message });
     res.status(500).json({ error: "Webhook error" });

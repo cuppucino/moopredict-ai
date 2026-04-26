@@ -456,9 +456,9 @@ Respond with ONLY valid JSON:
   }
 
   /**
-   * Generate a beginner-friendly lesson based on HK paper trading performance.
+   * Generate a beginner-friendly lesson based on US paper trading performance.
    */
-  public async analyzeHKDailyPerformance(
+  public async analyzeDailyPerformance(
     gains: any[],
     losses: any[]
   ): Promise<string> {
@@ -466,7 +466,7 @@ Respond with ONLY valid JSON:
 
     const prompt = `
       You are a friendly, encouraging Stock Trading Coach for a beginner.
-      Your task is to review yesterday's HK Paper Trading results and provide ONE clear, easy-to-understand lesson.
+      Your task is to review yesterday's US Paper Trading results and provide ONE clear, easy-to-understand lesson.
 
       YESTERDAY'S RESULTS:
       - Profitable Trades: ${gains.length > 0 ? gains.map(g => `${g.symbol} (+$${g.pnl})`).join(', ') : 'None'}

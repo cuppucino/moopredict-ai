@@ -351,7 +351,7 @@ export async function initPostgres(): Promise<void> {
       CREATE TABLE IF NOT EXISTS agent_learnings (
           id SERIAL PRIMARY KEY,
           date DATE UNIQUE NOT NULL,
-          market VARCHAR(10) DEFAULT 'HK',
+          market VARCHAR(10) DEFAULT 'US',
           total_gain DECIMAL(15,2) DEFAULT 0.00,
           total_loss DECIMAL(15,2) DEFAULT 0.00,
           lesson TEXT,
@@ -444,9 +444,7 @@ export async function initPostgres(): Promise<void> {
     // Seed virtual_portfolio if empty
     await client.query(`
       INSERT INTO virtual_portfolio (currency, starting_balance, current_balance)
-      VALUES 
-        ('HKD', 50000.00, 50000.00),
-        ('USD', 5000.00, 5000.00)
+      VALUES ('USD', 5000.00, 5000.00)
       ON CONFLICT (currency) DO NOTHING
     `);
 

@@ -108,17 +108,6 @@ class TradeStore {
     `, [today, amount]);
   }
 
-  async getHKTradesByDate(date: string): Promise<TradeRecord[]> {
-    // HK symbols are numeric strings (e.g. '00700', '3690.HK')
-    const result = await query(`
-      SELECT * FROM trade_history 
-      WHERE DATE(created_at) = $1 
-      AND (symbol ~ '^[0-9]' OR symbol LIKE '%.HK')
-      AND mode IN ('PAPER', 'PAPER_EXPLORE')
-      ORDER BY created_at ASC
-    `, [date]);
-    return result.rows as TradeRecord[];
-  }
 
   async saveAgentLearning(data: {
     date: string;
@@ -130,7 +119,7 @@ class TradeStore {
   }): Promise<void> {
     await query(`
       INSERT INTO agent_learnings (date, market, total_gain, total_loss, lesson, top_performer, worst_performer)
-      VALUES ($1, 'HK', $2, $3, $4, $5, $6)
+      VALUES ($1, 'US', $2, $3, $4, $5, $6)
       ON CONFLICT(date) DO UPDATE SET
         total_gain = EXCLUDED.total_gain,
         total_loss = EXCLUDED.total_loss,

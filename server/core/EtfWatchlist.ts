@@ -2,7 +2,7 @@ export interface EtfEntry {
   symbol: string;
   name: string;
   sector: string;
-  market: 'US' | 'HK';
+  market: 'US';
   description: string;
   preferred_timeframe: 'SHORT' | 'LONG';
 }
