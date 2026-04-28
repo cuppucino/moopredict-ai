@@ -1,48 +1,38 @@
-import { v4 as uuidv4 } from 'uuid';
+import { v4 as uuidv4 } from "uuid";
 
-export interface Notification {
+interface Notification {
   id: string;
   message: string;
   level: string;
-  timestamp: Date;
   sent: boolean;
+  created_at: Date;
 }
 
-class NotificationQueue {
-  private queue: Notification[] = [];
-  private readonly MAX_HISTORY = 100;
+let queue: Notification[] = [];
 
-  public enqueue(message: string, level: string = 'info'): string {
-    const id = uuidv4();
-    const notification: Notification = {
-      id,
+export const notificationQueue = {
+  enqueue(message: string, level: string = "info") {
+    queue.push({
+      id: uuidv4(),
       message,
       level,
-      timestamp: new Date(),
-      sent: false
-    };
+      sent: false,
+      created_at: new Date()
+    });
+    // Keep last 100
+    if (queue.length > 100) queue.shift();
+  },
 
-    this.queue.push(notification);
-    
-    if (this.queue.length > this.MAX_HISTORY) {
-      this.queue.shift();
-    }
+  getPending() {
+    return queue.filter(n => !n.sent);
+  },
 
-    return id;
-  }
-
-  public getPending(): Notification[] {
-    return this.queue.filter(n => !n.sent);
-  }
-
-  public markAsSent(id: string): void {
-    const n = this.queue.find(item => item.id === id);
+  markAsSent(id: string) {
+    const n = queue.find(x => x.id === id);
     if (n) n.sent = true;
-  }
+  },
 
-  public getAll(): Notification[] {
-    return [...this.queue];
+  clear() {
+    queue = [];
   }
-}
-
-export const notificationQueue = new NotificationQueue();
+};

@@ -1,12 +1,20 @@
 import { Pool, PoolClient } from 'pg';
+import { existsSync } from 'fs';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
+// When running inside Docker, replace localhost/127.0.0.1 with host.docker.internal
+const isDocker = existsSync('/.dockerenv');
+const rawDbUrl = process.env.DATABASE_URL || '';
+const dbUrl = isDocker
+  ? rawDbUrl.replace('localhost', 'host.docker.internal').replace('127.0.0.1', 'host.docker.internal')
+  : rawDbUrl;
+
 // PostgreSQL connection pool
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  connectionString: dbUrl,
+  ssl: false,
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 8000,
@@ -361,19 +369,35 @@ export async function initPostgres(): Promise<void> {
       )
     `);
 
-    // --- MooPredict V4 Tables ---
+    // user_watchlist
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_watchlist (
+        id        SERIAL PRIMARY KEY,
+        symbol    VARCHAR(20) UNIQUE NOT NULL,
+        added_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
 
-    // news_intel table (Team A)
+    // news_intel
     await client.query(`
       CREATE TABLE IF NOT EXISTS news_intel (
-        id SERIAL PRIMARY KEY,
-        headline TEXT NOT NULL,
-        summary TEXT,
-        source VARCHAR(50),
-        url TEXT UNIQUE,
-        mentioned_tickers TEXT[],
-        sector VARCHAR(50),
-        sentiment_score DECIMAL(5, 2),
+        id         SERIAL PRIMARY KEY,
+        headline   TEXT NOT NULL,
+        summary    TEXT,
+        source     VARCHAR(50),
+        url        TEXT UNIQUE NOT NULL,
+        scraped_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    // x_posts
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS x_posts (
+        id         SERIAL PRIMARY KEY,
+        author     TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        post_url   TEXT UNIQUE NOT NULL,
+        posted_at  TIMESTAMPTZ,
         scraped_at TIMESTAMPTZ DEFAULT NOW()
       )
     `);

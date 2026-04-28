@@ -1,17 +1,15 @@
 import axios from "axios";
 import fs from 'fs';
-import { logger } from "../core/Logger";
-import { config } from "../core/Config";
-import { CircuitBreaker } from "../core/CircuitBreaker";
+import { logger } from "../core/Logger.js";
+import { config } from "../core/Config.js";
 
 /**
  * Enterprise Telegram Service.
  * 
- * Provides direct Telegram bot communication with circuit breaker protection.
+ * Provides direct Telegram bot communication.
  */
 
 const AVAILABLE = !!(config.TELEGRAM_BOT_TOKEN && config.TELEGRAM_CHAT_ID);
-const breaker = new CircuitBreaker({ name: 'Telegram', failureThreshold: 3, resetTimeoutMs: 60000 });
 
 export type TelegramLevel = 'info' | 'warning' | 'important' | 'critical';
 
@@ -35,27 +33,29 @@ export const sendTelegramMessage = async (
     return false;
   }
 
-  return breaker.execute(async () => {
-    try {
-      const text = `${LEVEL_PREFIX[level]} *MooPredict*\n\n${message}`;
-      const url  = `https://api.telegram.org/bot${config.TELEGRAM_BOT_TOKEN}/sendMessage`;
+  try {
+    const escapedMessage = message
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    const text = `<b>${LEVEL_PREFIX[level]} MooPredict</b>\n\n${escapedMessage}`;
+    const url  = `https://api.telegram.org/bot${config.TELEGRAM_BOT_TOKEN}/sendMessage`;
 
-      const response = await axios.post(url, {
-        chat_id:    config.TELEGRAM_CHAT_ID,
-        text,
-        parse_mode: 'Markdown',
-      }, { timeout: 5000 });
+    const response = await axios.post(url, {
+      chat_id:    config.TELEGRAM_CHAT_ID,
+      text,
+      parse_mode: 'HTML',
+    }, { timeout: 5000 });
 
-      if (response.data?.ok === true) {
-        logger.info("[Telegram] Message sent successfully");
-        return true;
-      }
-      return false;
-    } catch (error: any) {
-      logger.error(`[Telegram] Failed to send: ${error.message}`);
-      return false;
+    if (response.data?.ok === true) {
+      logger.info("[Telegram] Message sent successfully");
+      return true;
     }
-  });
+    return false;
+  } catch (error: any) {
+    logger.error(`[Telegram] Failed to send: ${error.message}`);
+    return false;
+  }
 };
 
 /**
@@ -68,35 +68,33 @@ export const sendTelegramPhoto = async (
 ): Promise<boolean> => {
   if (!AVAILABLE) return false;
 
-  return breaker.execute(async () => {
-    try {
-      if (!fs.existsSync(photoPath)) {
-        throw new Error(`File not found: ${photoPath}`);
-      }
-
-      const fileData = fs.readFileSync(photoPath);
-      const url = `https://api.telegram.org/bot${config.TELEGRAM_BOT_TOKEN}/sendPhoto`;
-
-      // Use modern Node FormData if available (Node 18+), otherwise manual construction
-      // Actually, axios handles it well if we provide a Buffer in a FormData object
-      const formData = new FormData();
-      formData.append('chat_id', config.TELEGRAM_CHAT_ID as string);
-      formData.append('photo', new Blob([fileData]), 'image.png');
-      if (caption) {
-        formData.append('caption', caption);
-        formData.append('parse_mode', 'Markdown');
-      }
-
-      const response = await axios.post(url, formData, {
-        timeout: 15000
-      });
-
-      return response.data?.ok === true;
-    } catch (error: any) {
-      logger.error(`[Telegram] Photo send failed: ${error.message}`);
-      return false;
+  try {
+    if (!fs.existsSync(photoPath)) {
+      throw new Error(`File not found: ${photoPath}`);
     }
-  });
+
+    const fileData = fs.readFileSync(photoPath);
+    const url = `https://api.telegram.org/bot${config.TELEGRAM_BOT_TOKEN}/sendPhoto`;
+
+    // Use modern Node FormData if available (Node 18+), otherwise manual construction
+    // Actually, axios handles it well if we provide a Buffer in a FormData object
+    const formData = new FormData();
+    formData.append('chat_id', config.TELEGRAM_CHAT_ID as string);
+    formData.append('photo', new Blob([fileData]), 'image.png');
+    if (caption) {
+      formData.append('caption', caption);
+      formData.append('parse_mode', 'Markdown');
+    }
+
+    const response = await axios.post(url, formData, {
+      timeout: 15000
+    });
+
+    return response.data?.ok === true;
+  } catch (error: any) {
+    logger.error(`[Telegram] Photo send failed: ${error.message}`);
+    return false;
+  }
 };
 
 /**

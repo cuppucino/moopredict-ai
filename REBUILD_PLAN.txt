@@ -1,0 +1,266 @@
+================================================================================
+MOOPREDICT REBUILD PLAN — CLEAN VERSION
+Last updated: 2026-04-27
+================================================================================
+
+================================================================================
+REAL ARCHITECTURE (how it actually works)
+================================================================================
+
+  Telegram user
+      |
+      v
+  OpenClaw Gateway (Docker, port 18789/18790)
+      |
+      |-- Receives chat commands (!status, !positions, etc.)
+      |-- Uses bridge-logic.js for custom AI behaviour
+      |-- Forwards specific commands → MooPredict server (port 3001/webhook)
+      |
+  MooPredict Server (port 3001)
+      |
+      |-- Receives webhook from OpenClaw, processes commands
+      |-- Scrapes news every hour, posts alerts → OpenClaw (port 18789)
+      |-- Scrapes X posts every 15 min, posts alerts → OpenClaw (port 18789)
+      |-- Connects to Moomoo (port 11111) for positions + trade execution
+      |
+  Moomoo (moomoo_openD, port 11111)
+      |
+      -- Paper trading account, place buy/sell orders
+
+  Two-way communication:
+    MooPredict → OpenClaw  :  POST http://127.0.0.1:18789/webhook  (news alerts)
+    OpenClaw   → MooPredict:  POST http://host.docker.internal:3001/webhook (commands)
+
+================================================================================
+WHAT TO BUILD (simple, nothing more)
+================================================================================
+
+  1. News scraper        — RSS every 60 min → forward headlines to OpenClaw
+  2. X post scraper      — Nitter RSS every 15 min → forward posts to OpenClaw
+  3. Moomoo sync         — Read positions/balance, execute trades on command
+  4. Webhook handler     — Receive OpenClaw commands, respond via Telegram
+  5. bridge-logic.js     — Needs to exist and be valid (OpenClaw mounts it)
+
+================================================================================
+WHAT TO DELETE
+================================================================================
+
+server/agents/                          all 10 pipeline agents
+server/config/botProfiles.ts
+server/core/CircuitBreaker.ts
+server/core/EtfWatchlist.ts
+server/core/EventBus.ts
+server/services/aiService.ts
+server/services/ensemblePredictor.ts
+server/services/etfDataService.ts
+server/services/etfTechnicalAnalysis.ts
+server/services/macroEventAnalyzer.ts
+server/services/marketHoursService.ts
+server/services/mlServiceClient.ts
+server/services/newsService.ts
+server/services/ollamaService.ts
+server/services/scheduler.ts
+server/services/socialService.ts
+server/services/tradeStore.ts
+server/services/notificationQueue.ts
+server/utils/TechnicalAnalyzer.ts
+server/middleware/rateLimiter.ts
+server/db/database.ts
+server/scripts/
+server/tests/
+scripts/ask_ollama.ts
+scripts/log_manual_trades.ts
+scripts/seed_focus_stocks.ts
+scripts/start_enterprise.sh
+scripts/test_api.ts
+scripts/test_digest.ts
+etf-plan.json
+news-scheduler-improvement-plan.json
+rsi-improvement-plan.json
+
+================================================================================
+WHAT TO KEEP (untouched)
+================================================================================
+
+server/core/Config.ts               env var loader
+server/core/Logger.ts               logging
+server/db/postgres.ts               database connection
+server/middleware/auth.ts           API key check
+server/services/telegramService.ts  send Telegram messages
+server/services/openclaw_service.ts trimmed (keep only send_alert + core sender)
+scripts/notify-poller.mjs           OpenClaw heartbeat — keep as-is
+scripts/start_stack.sh              startup — keep as-is
+
+================================================================================
+NEW FILES TO CREATE
+================================================================================
+
+server/services/newsScraper.ts
+  - Fetches BBC, Reuters, CNBC, MarketWatch, Google News via RSS
+  - 10 articles per source max (50 total)
+  - Deduplicates against news_intel DB table
+  - Sends new headlines batch to OpenClaw in one clean message
+  - No Ollama, no AI. Just raw headlines.
+
+server/services/xScraper.ts
+  - Fetches Nitter RSS for: elonmusk, realDonaldTrump, federalreserve,
+    GaryGensler, SECGov
+  - Nitter public instances (free, no API key needed):
+      Primary:  https://nitter.net/{user}/rss
+      Fallback: https://nitter.privacydev.net/{user}/rss
+  - Deduplicates against x_posts DB table by post URL
+  - Any new post → immediate alert to OpenClaw (tweets are time sensitive)
+  - If all Nitter instances fail for a user, silently skip (log warning only)
+
+server/services/futuService.ts  (NEW simplified version)
+  - Connects to moomoo_openD on port 11111
+  - getPositions()  → list of open positions with qty, avg price, current P&L
+  - getBalance()    → available cash, total portfolio value
+  - placeOrder(symbol, side, qty, price)  → execute buy/sell
+  - reconnect()     → manual reconnect if connection drops
+
+server/services/cron.ts
+  - Two jobs only:
+      Every 60 min  → newsScraper.run()
+      Every 15 min  → xScraper.run()
+  - Both run 24/7, no market hour checks, no weekend logic
+
+server.ts  (new clean version)
+  - Express on port 3001
+  - Routes:
+      GET  /health                       → { ok: true, uptime }
+      GET  /api/notifications/pending    → for notify-poller.mjs
+      POST /api/notifications/dequeue    → for notify-poller.mjs
+      POST /webhook                      → receives commands from OpenClaw
+  - Telegram commands (received via OpenClaw webhook):
+      !checkstatus  → fetch positions + P&L from Moomoo, send to Telegram
+      !news         → trigger immediate news scrape
+      !help         → list commands
+
+bridge-logic.js  (fix / recreate)
+  - OpenClaw mounts this file and patches it into its own code on startup
+  - If this file is missing or broken, OpenClaw behaves differently
+  - Needs to be a valid JS snippet — content depends on what custom AI
+    behaviour you want OpenClaw to use
+  - Minimum viable version: empty export so the patch does nothing harmful
+
+================================================================================
+DATABASE (new clean schema)
+================================================================================
+
+DROP everything except:
+
+CREATE TABLE news_intel (
+  id          SERIAL PRIMARY KEY,
+  headline    TEXT NOT NULL,
+  summary     TEXT,
+  source      TEXT,
+  url         TEXT UNIQUE NOT NULL,
+  scraped_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE x_posts (
+  id          SERIAL PRIMARY KEY,
+  author      TEXT NOT NULL,
+  content     TEXT NOT NULL,
+  post_url    TEXT UNIQUE NOT NULL,
+  posted_at   TIMESTAMPTZ,
+  scraped_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+Tables to drop:
+  signal_outcomes, etf_data, etf_signals, etf_technical_indicators,
+  market_events, catalyst_events, social_mentions, agent_learnings,
+  virtual_portfolio, virtual_trades, trade_signals, focus_stocks,
+  bot_state, bot_profiles, user_sessions
+
+Table to keep (already exists):
+  user_watchlist  — used for !checkstatus and targeted scraping
+
+================================================================================
+.env (clean)
+================================================================================
+
+DATABASE_URL=REMOVED_PRIVATE_VALUE
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+INTERNAL_API_KEY=...
+OPENCLAW_WEBHOOK_URL=http://127.0.0.1:18789/webhook
+FUTU_PORT=11111
+FUTU_HOST=127.0.0.1
+
+Remove: OLLAMA_MODEL, TRADE_MARKET, TRADE_CURRENCY, MAX_DAILY_LOSS_USD,
+        TRADE_LOT_VALUE_USD, FUTU_TRADE_MODE
+
+================================================================================
+OPENCLAW MESSAGE FORMAT
+================================================================================
+
+News batch (every hour):
+  ───────────────────────────
+  📰 NEWS BATCH — 14:00
+  ───────────────────────────
+  • [BBC] Fed signals rate pause amid inflation data
+  • [Reuters] Apple earnings beat estimates by 12%
+  • [CNBC] Oil falls 3% on supply surge
+  ... (up to 20 headlines)
+
+X post alert (immediate on new post):
+  ───────────────────────────
+  🐦 @elonmusk — 14:03
+  ───────────────────────────
+  "This tweet content here..."
+
+================================================================================
+BUILD ORDER
+================================================================================
+
+  Phase 1 — Clean up
+    [ ] Delete files listed in WHAT TO DELETE section
+    [ ] Drop DB tables listed above, create news_intel + x_posts
+    [ ] Clean .env
+    [ ] Fix/restore bridge-logic.js
+
+  Phase 2 — Core services
+    [ ] newsScraper.ts
+    [ ] xScraper.ts
+    [ ] cron.ts
+    [ ] futuService.ts (simplified)
+
+  Phase 3 — Server
+    [ ] server.ts (clean minimal version)
+    [ ] Test /webhook receives from OpenClaw
+    [ ] Test !checkstatus returns Moomoo data
+
+  Phase 4 — Test end to end
+    [ ] Trigger !news manually, confirm OpenClaw receives it
+    [ ] Wait for X scrape, confirm new posts arrive in OpenClaw
+    [ ] Confirm Moomoo positions visible via !checkstatus
+
+================================================================================
+ABOUT bridge-logic.js
+================================================================================
+
+OpenClaw Docker mounts this file:
+  /Users/admin/moopredict-ai/bridge-logic.js → /app/bridge-logic.js (read-only)
+
+On startup it patches the file into OpenClaw's main JS bundle:
+  sed ... '/async function getReplyFromConfig(ctx, opts, configOverride) {/r /app/bridge-logic.js'
+
+This means:
+  - The file MUST exist before starting OpenClaw Docker
+  - If the file has a syntax error, OpenClaw's AI replies will break
+  - If the file is empty, the patch inserts nothing (safe fallback)
+
+Current status: bridge-logic.js was deleted from the repo.
+Fix: recreate it with the correct custom logic, or with an empty comment as
+     a safe placeholder until you decide what you want OpenClaw to do.
+
+================================================================================
+READY TO START?
+================================================================================
+
+Say "go" and I will execute all phases in order.
+Estimated time: 2-3 hours.
+
+================================================================================

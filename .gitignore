@@ -36,3 +36,11 @@ python/ml_service/venv/
 python/ml_service/__pycache__/
 python/ml_service/*.pyc
 python/ml_service/.env
+
+# Large Binaries & Data
+*.7z
+*.tar.gz
+*.zip
+*.csv
+moomoo_OpenD_*/
+.claude/

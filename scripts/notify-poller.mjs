@@ -96,13 +96,17 @@ async function apiFetch(path, opts = {}) {
 
 async function sendTelegram(notif) {
   const emoji = LEVEL_EMOJI[notif.level] ?? "ℹ️";
-  const text  = `${emoji} *MooPredict*\n\n${notif.message}`;
+  const escapedMessage = notif.message
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  const text  = `<b>${emoji} MooPredict</b>\n\n${escapedMessage}`;
   const url   = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
 
   const res = await fetch(url, {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: "Markdown" }),
+    body:    JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: "HTML" }),
   });
 
   const data = await res.json();
