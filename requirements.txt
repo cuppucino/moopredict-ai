@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+futu-api
+sqlalchemy
+psycopg2-binary
+apscheduler
+httpx
+beautifulsoup4
+python-dotenv
+pydantic
+pydantic-settings
+loguru

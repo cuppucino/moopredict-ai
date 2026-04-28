@@ -12,14 +12,11 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # 1. Start Notification Poller
-echo "📬 Starting Poller..."
+echo "📬 Starting Poller (Python)..."
 (
-  while true; do
-    node scripts/notify-poller.mjs >> logs/poller.log 2>&1
-    sleep 5
-  done
+  python3 scripts/notify_poller.py >> logs/poller.log 2>&1
 ) &
 
 # 2. Start Server
-echo "🧠 Starting Server..."
-npx tsx server/server.ts
+echo "🧠 Starting Server (Python)..."
+python3 main.py
