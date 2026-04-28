@@ -5,10 +5,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from loguru import logger
 
-from core.database import init_db, get_db, UserWatchlist
+# Configure logging to both console and file
+LOG_FILE = os.path.join(os.path.dirname(__file__), "logs", "combined.log")
+logger.add(LOG_FILE, rotation="500 MB", retention="10 days", level="INFO")
+
+from core.database import init_db, get_db, UserWatchlist, NewsIntel, SocialPost
 from core.scheduler import scheduler
 from services.moomoo_service import moomoo_service
 from services.notifications import notification_queue
+from services.technical_analysis import ta_service
+from services.earnings_calendar import earnings_service
+from services.sector_analysis import sector_service
+from services.daily_briefing import briefing_service
+from services.options_flow import options_service
+from services.market_research import research_service
+from services.trade_journal import trade_journal
+from services.pattern_service import pattern_service
 
 app = FastAPI(title="MooPredict AI API")
 
@@ -88,6 +100,114 @@ def remove_from_watchlist(symbol: str, db: Session = Depends(get_db)):
     db.query(UserWatchlist).filter(UserWatchlist.symbol == symbol).delete()
     db.commit()
     return {"success": True, "symbol": symbol}
+    
+@app.get("/api/news")
+def get_news(limit: int = 20, db: Session = Depends(get_db)):
+    """Fetch recent news articles."""
+    articles = db.query(NewsIntel).order_by(NewsIntel.scraped_at.desc()).limit(limit).all()
+    return [
+        {
+            "id": a.id,
+            "headline": a.headline,
+            "summary": a.summary,
+            "source": a.source,
+            "url": a.url,
+            "scraped_at": a.scraped_at
+        } for a in articles
+    ]
+
+@app.get("/api/social")
+def get_social(limit: int = 20, db: Session = Depends(get_db)):
+    """Fetch recent social media posts."""
+    posts = db.query(SocialPost).order_by(SocialPost.scraped_at.desc()).limit(limit).all()
+    return [
+        {
+            "id": p.id,
+            "platform": p.platform,
+            "author": p.author,
+            "content": p.content,
+            "url": p.post_url,
+            "posted_at": p.posted_at,
+            "scraped_at": p.scraped_at
+        } for p in posts
+    ]
+
+@app.get("/api/ta/{symbol}")
+def get_technical_analysis(symbol: str):
+    """Fetch full technical analysis for a stock."""
+    return ta_service.get_full_analysis(symbol)
+
+@app.get("/api/earnings/{symbol}")
+def get_earnings(symbol: str):
+    """Fetch earnings info for a stock."""
+    return earnings_service.get_stock_earnings(symbol)
+
+@app.get("/api/earnings/watchlist")
+def get_watchlist_earnings(db: Session = Depends(get_db)):
+    """Fetch earnings for all stocks in watchlist."""
+    symbols = db.query(UserWatchlist).all()
+    symbol_list = [s.symbol for s in symbols]
+    return earnings_service.get_watchlist_earnings(symbol_list)
+
+@app.get("/api/sectors")
+def get_sectors():
+    """Fetch sector performance heatmap."""
+    return sector_service.get_sector_performance()
+
+@app.get("/api/sectors/{symbol}")
+def get_sector_detail(symbol: str):
+    """Fetch detailed performance for a specific sector ETF."""
+    return sector_service.get_sector_detail(symbol)
+
+@app.get("/api/options/{symbol}")
+def get_options_flow(symbol: str):
+    """Fetch unusual options activity."""
+    return options_service.get_unusual_activity(symbol)
+
+@app.get("/api/research/{symbol}")
+def get_market_research(symbol: str):
+    """Generate a full AI deep-dive research report."""
+    return {"report": research_service.perform_deep_dive(symbol)}
+
+@app.get("/api/journal")
+def get_journal(limit: int = 20):
+    """Fetch recent trade journal entries."""
+    return trade_journal.get_recent(limit)
+
+@app.get("/api/journal/stats")
+def get_journal_stats():
+    """Fetch trade statistics."""
+    return trade_journal.get_stats()
+
+@app.get("/api/patterns")
+def get_patterns(limit: int = 20):
+    """Fetch recorded market patterns."""
+    return pattern_service.get_all(limit)
+
+@app.post("/api/trade")
+def place_trade(payload: dict):
+    """API endpoint to place a trade."""
+    symbol = payload.get("symbol")
+    qty = payload.get("qty")
+    side = payload.get("side")
+    order_type = payload.get("order_type", "MARKET")
+    price = payload.get("price", 0.0)
+    
+    if not all([symbol, qty, side]):
+        raise HTTPException(status_code=400, detail="symbol, qty, and side are required")
+        
+    result = moomoo_service.place_order(
+        symbol=symbol,
+        qty=float(qty),
+        side=side,
+        order_type=order_type,
+        price=float(price)
+    )
+    
+    if not result["success"]:
+        raise HTTPException(status_code=500, detail=result["error"])
+        
+    return result
 
 # ─── Webhook (Command Handler) ──────────────────────────────────────────────
 @app.post("/webhook")
@@ -167,11 +287,208 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
             count = reddit_scraper.run()
             return {"content": f"🤖 Reddit scrape triggered! Found {count} new posts."}
 
+        if command == "!ta" and len(parts) > 1:
+            symbol = parts[1].upper()
+            analysis = ta_service.get_full_analysis(symbol)
+            if "error" in analysis:
+                return {"content": f"❌ Error: {analysis['error']}"}
+            
+            ma = analysis['moving_averages']
+            macd = analysis['macd']
+            
+            report = (
+                f"📈 *Technical Analysis: {symbol}*\n"
+                f"──────────────────\n"
+                f"💵 Price: ${analysis['price']:.2f}\n"
+                f"📊 RSI: {analysis['rsi']}\n"
+                f"📉 MACD: {macd['macd']:.4f} (Trend: {macd['trend']})\n"
+                f"📏 SMA20: ${ma['sma20']:.2f}\n"
+                f"📏 SMA50: ${ma['sma50']:.2f}\n"
+                f"🎯 Summary: *{analysis['summary']}*"
+            )
+            return {"content": report}
+
+        if command == "!rsi" and len(parts) > 1:
+            symbol = parts[1].upper()
+            analysis = ta_service.get_full_analysis(symbol)
+            if "error" in analysis: return {"content": f"❌ Error: {analysis['error']}"}
+            return {"content": f"📊 *{symbol} RSI:* {analysis['rsi']}"}
+
+        if command == "!macd" and len(parts) > 1:
+            symbol = parts[1].upper()
+            analysis = ta_service.get_full_analysis(symbol)
+            if "error" in analysis: return {"content": f"❌ Error: {analysis['error']}"}
+            macd = analysis['macd']
+            return {"content": f"📉 *{symbol} MACD:* {macd['macd']:.4f} ({macd['trend']})"}
+
+        if command == "!earnings" and len(parts) > 1:
+            symbol = parts[1].upper()
+            data = earnings_service.get_stock_earnings(symbol)
+            if not data.get("success"):
+                return {"content": f"❌ No earnings data found for {symbol}."}
+            dates = ", ".join(data['earnings_dates'])
+            return {"content": f"📅 *{symbol} Earnings:* {dates}\nEst EPS: ${data.get('eps_estimate', 'N/A')}"}
+
+        if command == "!earnings":
+            symbols = db.query(UserWatchlist).all()
+            if not symbols: return {"content": "Watchlist is empty."}
+            results = earnings_service.get_watchlist_earnings([s.symbol for s in symbols])
+            lines = []
+            for r in results:
+                if r.get("success"):
+                    date = r['earnings_dates'][0] if r['earnings_dates'] else "N/A"
+                    lines.append(f"• {r['symbol']}: {date}")
+            return {"content": "📅 *Upcoming Earnings (Watchlist)*\n──────────────\n" + "\n".join(lines)}
+
+        if command == "!sectors":
+            results = sector_service.get_sector_performance()
+            if not results: return {"content": "⚠️ Failed to fetch sector data."}
+            lines = [f"• {s['symbol']} ({s['name']}): {s['change_1d']}%" for s in results[:10]]
+            return {"content": "📊 *Sector Performance (1D)*\n──────────────\n" + "\n".join(lines)}
+
+        if command == "!briefing":
+            briefing_service.generate_morning_briefing()
+            return {"content": "🚀 Morning briefing triggered manually. Check Telegram in a moment!"}
+
+        if command == "!options" and len(parts) > 1:
+            symbol = parts[1].upper()
+            data = options_service.get_unusual_activity(symbol)
+            if "error" in data: return {"content": f"❌ Error: {data['error']}"}
+            
+            lines = [f"• {o['strike']}{o['type']} {o['expiry']}: {o['ratio']}x Vol/OI" for o in data['unusual_activity'][:5]]
+            report = (
+                f"🎲 *Options Flow: {symbol}*\n"
+                f"──────────────────\n"
+                f"📊 Put/Call Ratio: {data['put_call_ratio']}\n"
+                f"🎯 Sentiment: *{data['sentiment']}*\n\n"
+                f"*Unusual Activity:*\n" + "\n".join(lines)
+            )
+            return {"content": report}
+
+        if command == "!pcr" and len(parts) > 1:
+            symbol = parts[1].upper()
+            data = options_service.get_pcr(symbol)
+            if "error" in data: return {"content": f"❌ Error: {data['error']}"}
+            return {"content": f"🎲 *{symbol} Put/Call Ratio:* {data['pcr']} ({data['sentiment']})"}
+
+        if command in ["!research", "!dd"] and len(parts) > 1:
+            symbol = parts[1].upper()
+            return {"content": research_service.perform_deep_dive(symbol)}
+
+        if command in ["!buy", "!sell"] and len(parts) >= 3:
+            # Usage: !buy AAPL 10 [limit_price]
+            side = "BUY" if command == "!buy" else "SELL"
+            symbol = parts[1].upper()
+            try:
+                qty = float(parts[2])
+                price = float(parts[3]) if len(parts) > 3 else 0.0
+                order_type = "LIMIT" if price > 0 else "MARKET"
+                
+                result = moomoo_service.place_order(symbol, qty, side, order_type, price)
+                if result["success"]:
+                    # Auto-log to journal
+                    trade_id = trade_journal.log_trade(
+                        symbol=symbol,
+                        side=side,
+                        qty=qty,
+                        price=result.get("data", {}).get("last_price", price) or price,
+                        order_type=order_type
+                    )
+                    return {"content": f"✅ *Trade Success*\nOrdered {qty} {symbol} ({side})\nJournaled as Trade #{trade_id}"}
+                else:
+                    return {"content": f"❌ *Trade Failed*\n{result['error']}"}
+            except ValueError:
+                return {"content": "⚠️ Invalid quantity or price."}
+
+        if command == "!tradelog":
+            mode = parts[1] if len(parts) > 1 else ""
+            if mode == "stats":
+                stats = trade_journal.get_stats()
+                report = (
+                    f"📊 *Trade Statistics*\n"
+                    f"──────────────────\n"
+                    f"📈 Total Trades: {stats['total']}\n"
+                    f"🎯 Win Rate: {stats['win_rate']}\n"
+                    f"💰 Total P&L: {stats['total_pnl']}\n"
+                    f"📏 Avg %: {stats['avg_pnl_pct']}"
+                )
+                return {"content": report}
+            
+            recent = trade_journal.get_recent(5)
+            lines = [f"• #{t['id']} {t['side']} {t['symbol']}: {t['status']} ({t['pnl']})" for t in recent]
+            return {"content": "📝 *Recent Trades*\n──────────────\n" + ("\n".join(lines) if lines else "No trades logged yet.")}
+
+        if command == "!thesis" and len(parts) > 2:
+            try:
+                trade_id = int(parts[1])
+                thesis = " ".join(parts[2:])
+                if trade_journal.update_thesis(trade_id, thesis):
+                    return {"content": f"✅ Thesis updated for Trade #{trade_id}."}
+                return {"content": "❌ Trade not found."}
+            except ValueError:
+                return {"content": "⚠️ Invalid Trade ID."}
+
+        if command == "!lesson" and len(parts) > 2:
+            try:
+                trade_id = int(parts[1])
+                lesson = " ".join(parts[2:])
+                if trade_journal.add_lesson(trade_id, lesson):
+                    return {"content": f"✅ Lesson added to Trade #{trade_id}."}
+                return {"content": "❌ Trade not found."}
+            except ValueError:
+                return {"content": "⚠️ Invalid Trade ID."}
+
+        if command == "!close" and len(parts) > 2:
+            try:
+                trade_id = int(parts[1])
+                exit_price = float(parts[2])
+                lessons = " ".join(parts[3:]) if len(parts) > 3 else ""
+                if trade_journal.close_trade(trade_id, exit_price, lessons):
+                    return {"content": f"🏁 Trade #{trade_id} closed at ${exit_price}."}
+                return {"content": "❌ Failed to close trade."}
+            except ValueError:
+                return {"content": "⚠️ Invalid ID or price."}
+
+        if command == "!pattern" and len(parts) > 4:
+            # Usage: !pattern "Name" CATEGORY "Obs" "Thesis" [Symbols]
+            # For simplicity, we'll use quotes for multi-word args or just take the rest
+            try:
+                # Basic parsing for demo purposes
+                name = parts[1]
+                category = parts[2]
+                observation = parts[3]
+                thesis = parts[4]
+                symbols = parts[5] if len(parts) > 5 else ""
+                pid = pattern_service.record_pattern(name, category, observation, thesis, symbols)
+                return {"content": f"🧠 Pattern #{pid} recorded: {name}"}
+            except:
+                return {"content": "⚠️ Usage: !pattern NAME CATEGORY OBS THESIS [SYMBOLS]"}
+
+        if command == "!patterns":
+            patterns = pattern_service.get_all(5)
+            lines = [f"• #{p['id']} {p['name']} ({p['category']})" for p in patterns]
+            return {"content": "🧠 *Market Patterns*\n──────────────\n" + ("\n".join(lines) if lines else "No patterns recorded.")}
+
         if command == "!help":
             return {
                 "content": (
                     f"*Commands:*\n"
+                    f"• !buy SYMBOL QTY [PRICE] — place buy order\n"
+                    f"• !sell SYMBOL QTY [PRICE] — place sell order\n"
                     f"• !checkstatus — positions & balance\n"
+                    f"• !ta SYMBOL — full technical analysis\n"
+                    f"• !rsi SYMBOL — RSI indicator\n"
+                    f"• !macd SYMBOL — MACD indicator\n"
+                    f"• !earnings [SYMBOL] — earnings calendar\n"
+                    f"• !sectors — sector heatmap\n"
+                    f"• !options SYMBOL — unusual options activity\n"
+                    f"• !research SYMBOL — full stock deep-dive\n"
+                    f"• !tradelog [stats] — view trade history\n"
+                    f"• !thesis ID TEXT — record trade reasoning\n"
+                    f"• !lesson ID TEXT — record post-trade lesson\n"
+                    f"• !pattern NAME CAT OBS THESIS — record pattern\n"
+                    f"• !patterns — list patterns\n"
+                    f"• !briefing — manual daily report\n"
                     f"• !watchlist — show watchlist\n"
                     f"• !add SYMBOL — add to watchlist\n"
                     f"• !remove SYMBOL — remove from watchlist\n"

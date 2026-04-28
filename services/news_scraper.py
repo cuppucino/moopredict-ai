@@ -19,9 +19,13 @@ class NewsScraper:
         db = SessionLocal()
         
         try:
+            import requests
+            headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
             for feed in FEEDS:
                 try:
-                    parsed = feedparser.parse(feed["url"])
+                    response = requests.get(feed["url"], headers=headers, timeout=10)
+                    parsed = feedparser.parse(response.text)
+                    logger.debug(f"[NewsScraper] Feed {feed['name']} returned {len(parsed.entries)} entries.")
                     # Limit to top 10 items per feed
                     for entry in parsed.entries[:10]:
                         headline = entry.get("title", "")
@@ -48,15 +52,20 @@ class NewsScraper:
             db.commit()
             
             if new_headlines:
+                # Use AI to summarize the news
+                from services.ai_service import ai_service
+                summary = ai_service.summarize_content("News", new_headlines)
+                
                 timestamp = datetime.now().strftime("%H:%M")
                 message = (
                     f"───────────────────────────\n"
-                    f"📰 NEWS BATCH — {timestamp}\n"
+                    f"📰 NEWS INTEL — {timestamp}\n"
                     f"───────────────────────────\n"
-                    + "\n".join(new_headlines[:20])
+                    f"{summary}\n\n"
+                    f"📈 *New Articles:* {len(new_headlines)}"
                 )
                 notification_queue.enqueue(message)
-                logger.info(f"[NewsScraper] Scrape complete. Found {len(new_headlines)} new headlines.")
+                logger.info(f"[NewsScraper] Scrape complete. Sent AI summary for {len(new_headlines)} headlines.")
             else:
                 logger.info("[NewsScraper] No new articles found.")
                 

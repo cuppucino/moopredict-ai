@@ -10,3 +10,7 @@ python-dotenv
 pydantic
 pydantic-settings
 loguru
+yfinance
+feedparser
+requests
+pandas

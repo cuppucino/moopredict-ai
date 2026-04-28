@@ -13,11 +13,15 @@ class RedditScraper:
         db = SessionLocal()
         
         try:
+            import requests
+            headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            new_contents = []
+            
             for sub in SUBREDDITS:
                 try:
                     url = f"https://www.reddit.com/r/{sub}/.rss"
-                    # User agent is important for Reddit RSS
-                    parsed = feedparser.parse(url, agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    response = requests.get(url, headers=headers, timeout=10)
+                    parsed = feedparser.parse(response.text)
                     
                     logger.debug(f"[RedditScraper] Subreddit r/{sub} returned {len(parsed.entries)} entries.")
                     
@@ -39,24 +43,32 @@ class RedditScraper:
                                 posted_at=datetime.now()
                             )
                             db.add(post)
-                            
-                            # For Reddit, we might want to batch, but let's notify for now
-                            # (Reddit can be noisy, so maybe only notify for high-sentiment/keywords later)
-                            timestamp = datetime.now().strftime("%H:%M")
-                            message = (
-                                f"───────────────────────────\n"
-                                f"🤖 r/{sub} — {timestamp}\n"
-                                f"───────────────────────────\n"
-                                f"\"{title}\""
-                            )
-                            notification_queue.enqueue(message)
+                            new_contents.append(f"r/{sub}: {title}")
                             new_count += 1
                             
                 except Exception as e:
                     logger.error(f"[RedditScraper] Failed to fetch r/{sub}: {e}")
             
             db.commit()
-            logger.info(f"[RedditScraper] Check complete. Found {new_count} new posts.")
+            
+            if new_count > 0:
+                # Use AI to summarize the new posts
+                from services.ai_service import ai_service
+                summary = ai_service.summarize_content("Reddit", new_contents)
+                
+                timestamp = datetime.now().strftime("%H:%M")
+                message = (
+                    f"───────────────────────────\n"
+                    f"🤖 REDDIT INTEL — {timestamp}\n"
+                    f"───────────────────────────\n"
+                    f"{summary}\n\n"
+                    f"📈 *New Posts:* {new_count}"
+                )
+                notification_queue.enqueue(message)
+                logger.info(f"[RedditScraper] Check complete. Sent AI summary for {new_count} posts.")
+            else:
+                logger.info("[RedditScraper] No new posts found.")
+                
             return new_count
             
         except Exception as e:

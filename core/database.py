@@ -43,6 +43,44 @@ class ManualPosition(Base):
     exit_time = Column(DateTime)
     pnl_pct = Column(Float)
 
+class TradeJournal(Base):
+    __tablename__ = "trade_journal"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), nullable=False)
+    side = Column(String(10), nullable=False) # BUY | SELL
+    quantity = Column(Float, nullable=False)
+    entry_price = Column(Float, nullable=False)
+    exit_price = Column(Float)
+    order_type = Column(String(20)) # MARKET | LIMIT
+    status = Column(String(20), default="OPEN") # OPEN | CLOSED | STOPPED_OUT
+    thesis = Column(Text)
+    stop_loss = Column(Float)
+    take_profit = Column(Float)
+    tags = Column(Text) # Comma-separated
+    outcome = Column(String(20)) # WIN | LOSS | BREAKEVEN
+    pnl_amount = Column(Float)
+    pnl_percent = Column(Float)
+    lessons = Column(Text)
+    entry_time = Column(DateTime, default=datetime.utcnow)
+    exit_time = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class PatternDB(Base):
+    __tablename__ = "pattern_database"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    category = Column(String(50)) # DIVERGENCE | BREAKOUT | etc
+    observation = Column(Text)
+    thesis = Column(Text)
+    symbols = Column(Text) # Comma-separated
+    data_snapshot = Column(Text)
+    confirmed = Column(Boolean, default=False)
+    confirmation = Column(Text)
+    lesson = Column(Text)
+    times_seen = Column(Integer, default=1)
+    last_seen = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 class SocialPost(Base):
     __tablename__ = "social_posts"
     id = Column(Integer, primary_key=True, index=True)

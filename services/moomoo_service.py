@@ -128,6 +128,42 @@ class MoomooService:
             logger.error(f"Error fetching positions: {e}")
             return []
 
+    def place_order(self, symbol: str, qty: float, side: str, order_type: str = "MARKET", price: float = 0.0) -> Dict:
+        """Place a trade order."""
+        if not self.trd_ctx or not self.acc_id:
+            return {"success": False, "error": "Not connected to Moomoo"}
+
+        try:
+            # Map side to TrdSide enum
+            trd_side = TrdSide.BUY if side.upper() == "BUY" else TrdSide.SELL
+            
+            # Map order type to OrderType enum
+            ot = OrderType.MARKET
+            if order_type.upper() == "LIMIT":
+                ot = OrderType.NORMAL # Futu uses NORMAL for limit orders in some contexts
+            
+            logger.info(f"[Moomoo] Placing {side} order for {qty} {symbol}...")
+            ret, data = self.trd_ctx.place_order(
+                price=price,
+                qty=qty,
+                code=symbol,
+                trd_side=trd_side,
+                order_type=ot,
+                trd_env=self.trd_env,
+                acc_id=self.acc_id
+            )
+            
+            if ret == RET_OK:
+                order_id = data.iloc[0]['order_id']
+                logger.info(f"[Moomoo] Order placed successfully! ID: {order_id}")
+                return {"success": True, "order_id": str(order_id), "data": data.to_dict(orient='records')[0]}
+            else:
+                logger.error(f"[Moomoo] Order failed: {data}")
+                return {"success": False, "error": str(data)}
+        except Exception as e:
+            logger.error(f"[Moomoo] Exception during order: {e}")
+            return {"success": False, "error": str(e)}
+
     def close(self):
         """Clean up connections."""
         if self.trd_ctx:

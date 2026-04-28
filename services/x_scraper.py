@@ -4,7 +4,19 @@ from loguru import logger
 from core.database import SessionLocal, SocialPost
 from services.notifications import notification_queue
 
-ACCOUNTS = ["elonmusk", "realDonaldTrump", "federalreserve", "GaryGensler", "SECGov"]
+ACCOUNTS = [
+    "elonmusk", 
+    "realDonaldTrump", 
+    "federalreserve", 
+    "GaryGensler", 
+    "SECGov",
+    "tim_cook",
+    "PGelsinger",
+    "lisasu",
+    "CathieDWood",
+    "saylor",
+    "VitalikButerin"
+]
 
 # Nitter instances are often flaky, so we rotate
 NITTER_INSTANCES = [
@@ -22,12 +34,17 @@ class XScraper:
         db = SessionLocal()
         
         try:
+            import requests
+            headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            new_contents = []
+            
             for account in ACCOUNTS:
                 success = False
                 for instance in NITTER_INSTANCES:
                     try:
                         url = f"{instance}/{account}/rss"
-                        parsed = feedparser.parse(url)
+                        response = requests.get(url, headers=headers, timeout=10)
+                        parsed = feedparser.parse(response.text)
                         
                         if parsed.get("bozo", 0) and not parsed.entries:
                             continue # Try next instance
@@ -49,19 +66,10 @@ class XScraper:
                                     author=account,
                                     content=content,
                                     post_url=canonical_url,
-                                    posted_at=datetime.now() # RSS might not have accurate pubDate or needs parsing
+                                    posted_at=datetime.now()
                                 )
                                 db.add(post)
-                                
-                                # Immediate notification for X
-                                timestamp = datetime.now().strftime("%H:%M")
-                                message = (
-                                    f"───────────────────────────\n"
-                                    f"🐦 @{account} — {timestamp}\n"
-                                    f"───────────────────────────\n"
-                                    f"\"{content}\""
-                                )
-                                notification_queue.enqueue(message)
+                                new_contents.append(f"@{account}: {content}")
                                 new_count += 1
                         
                         success = True
@@ -73,7 +81,25 @@ class XScraper:
                     logger.warning(f"[XScraper] Failed to fetch @{account} from all instances.")
             
             db.commit()
-            logger.info(f"[XScraper] Check complete. Found {new_count} new posts.")
+            
+            if new_count > 0:
+                # Use AI to summarize the new posts
+                from services.ai_service import ai_service
+                summary = ai_service.summarize_content("X (Twitter)", new_contents)
+                
+                timestamp = datetime.now().strftime("%H:%M")
+                message = (
+                    f"───────────────────────────\n"
+                    f"🐦 X INTEL — {timestamp}\n"
+                    f"───────────────────────────\n"
+                    f"{summary}\n\n"
+                    f"📈 *New Posts:* {new_count}"
+                )
+                notification_queue.enqueue(message)
+                logger.info(f"[XScraper] Check complete. Sent AI summary for {new_count} posts.")
+            else:
+                logger.info("[XScraper] No new posts found.")
+                
             return new_count
             
         except Exception as e:
