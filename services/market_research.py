@@ -29,8 +29,19 @@ class MarketResearchService:
         db.close()
         
         # 5. Build context for AI
+        STOCK_METADATA = {
+            "URA": "Global X Uranium ETF - tracks uranium miners",
+            "UEC": "Uranium Energy Corp - uranium mining company",
+            "XLE": "Energy Select Sector SPDR Fund",
+            "XLU": "Utilities Select Sector SPDR Fund",
+            "CCJ": "Cameco Corporation - large uranium producer",
+            "STX": "Seagate Technology - hard drive manufacturer",
+            "WDC": "Western Digital - hard drive and SSD manufacturer"
+        }
+        meta = STOCK_METADATA.get(symbol, "Unknown asset type")
+        
         context = (
-            f"STOCK: {symbol}\n"
+            f"STOCK: {symbol} ({meta})\n"
             f"PRICE: ${ta.get('price', 'N/A')}\n"
             f"TECHNICALS: RSI {ta.get('rsi')}, Trend {ta.get('summary')}\n"
             f"EARNINGS: {earnings.get('earnings_dates', ['Unknown'])[0]}\n"

@@ -61,6 +61,7 @@ class TradeJournal(Base):
     pnl_amount = Column(Float)
     pnl_percent = Column(Float)
     lessons = Column(Text)
+    external_id = Column(String(50), unique=True, index=True)
     entry_time = Column(DateTime, default=datetime.utcnow)
     exit_time = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -90,6 +91,17 @@ class SocialPost(Base):
     post_url = Column(Text, unique=True, nullable=False)
     posted_at = Column(DateTime)
     scraped_at = Column(DateTime, default=datetime.utcnow)
+
+class PriceAlert(Base):
+    __tablename__ = "price_alerts"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), nullable=False)
+    price = Column(Float, nullable=False)
+    direction = Column(String(10), nullable=False) # ABOVE | BELOW
+    action = Column(String(20), default="notify") # notify | sell
+    status = Column(String(20), default="ACTIVE") # ACTIVE | TRIGGERED | CANCELLED
+    created_at = Column(DateTime, default=datetime.utcnow)
+    triggered_at = Column(DateTime)
 
 def init_db():
     """Initialize the database tables."""

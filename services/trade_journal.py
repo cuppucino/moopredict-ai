@@ -1,9 +1,23 @@
+import os
 from datetime import datetime
 from typing import List, Dict, Optional
 from loguru import logger
 from core.database import SessionLocal, TradeJournal
+from services.moomoo_service import moomoo_service
 
 class TradeJournalService:
+    def _log_to_file(self, content: str):
+        """Append a trade record to trades.md."""
+        try:
+            file_exists = os.path.exists("trades.md")
+            with open("trades.md", "a") as f:
+                if not file_exists:
+                    f.write("| Timestamp | ID | Symbol | Side | Qty | Price | Status | P&L | Thesis/Lessons |\n")
+                    f.write("| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n")
+                f.write(content + "\n")
+        except Exception as e:
+            logger.error(f"[Journal] File logging error: {e}")
+
     def log_trade(self, symbol: str, side: str, qty: float, price: float, order_type: str = "MARKET", thesis: str = "", stop: float = None, target: float = None) -> int:
         """Create a new trade journal entry."""
         db = SessionLocal()
@@ -24,6 +38,11 @@ class TradeJournalService:
             db.commit()
             db.refresh(trade)
             logger.info(f"[Journal] Logged trade #{trade.id}: {side} {qty} {symbol} @ {price}")
+            
+            # Backup to trades.md
+            log_line = f"| {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} | {trade.id} | {symbol} | {side} | {qty} | {price} | OPEN | - | {thesis} |"
+            self._log_to_file(log_line)
+            
             return trade.id
         except Exception as e:
             logger.error(f"[Journal] Error logging trade: {e}")
@@ -61,6 +80,11 @@ class TradeJournalService:
                 
             db.commit()
             logger.info(f"[Journal] Closed trade #{trade_id} with {trade.outcome} (${trade.pnl_amount:.2f})")
+            
+            # Backup to trades.md
+            log_line = f"| {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} | {trade.id} | {trade.symbol} | {trade.side} | {trade.quantity} | {exit_price} | CLOSED | {trade.outcome} ({trade.pnl_percent:.2f}%) | {lessons} |"
+            self._log_to_file(log_line)
+            
             return True
         except Exception as e:
             logger.error(f"[Journal] Error closing trade: {e}")
@@ -129,6 +153,48 @@ class TradeJournalService:
                     "pnl": f"${t.pnl_amount:.2f}" if t.pnl_amount else "N/A"
                 } for t in trades
             ]
+        finally:
+            db.close()
+
+    def sync_past_trades(self, days: int = 30) -> Dict:
+        """Sync trades from Moomoo to the local journal."""
+        from datetime import datetime, timedelta
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        
+        m_trades = moomoo_service.get_trade_history(start_date=start_date)
+        if not m_trades:
+            return {"count": 0, "status": "No trades found in Moomoo or not connected"}
+            
+        db = SessionLocal()
+        synced_count = 0
+        try:
+            for mt in m_trades:
+                # Check if already exists by external_id
+                existing = db.query(TradeJournal).filter(TradeJournal.external_id == mt['order_id']).first()
+                if not existing:
+                    # Map Moomoo order to TradeJournal entry
+                    # Note: We treat every Moomoo order as an entry for now
+                    # In a more complex system, we'd match BUY/SELL pairs
+                    new_trade = TradeJournal(
+                        symbol=mt['symbol'],
+                        side=mt['side'],
+                        quantity=mt['qty'],
+                        entry_price=mt['price'],
+                        external_id=mt['order_id'],
+                        status="CLOSED" if "FILLED" in mt['status'] else "CANCELLED",
+                        entry_time=datetime.strptime(mt['time'].replace('T', ' ').split('.')[0], "%Y-%m-%d %H:%M:%S") if isinstance(mt['time'], str) else mt['time'],
+                        order_type=mt['order_type']
+                    )
+                    db.add(new_trade)
+                    synced_count += 1
+            
+            db.commit()
+            logger.info(f"[Journal] Synced {synced_count} new trades from Moomoo.")
+            return {"count": synced_count, "status": "Success"}
+        except Exception as e:
+            logger.error(f"[Journal] Sync error: {e}")
+            db.rollback()
+            return {"count": 0, "error": str(e)}
         finally:
             db.close()
 

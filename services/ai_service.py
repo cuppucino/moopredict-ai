@@ -17,18 +17,22 @@ class AIService:
         # Format the content for the prompt
         formatted_content = "\n".join([f"- {c}" for c in content_list])
         
+        # Refined prompt to avoid "financial advice" refusals
         prompt = (
-            f"You are a market intelligence analyst for MooPredict AI.\n"
-            f"Analyze the following {platform} activity and provide a very concise summary (max 3-5 bullet points).\n"
-            f"Focus on market-moving news, sentiment shifts, or specific mentions of stocks/CEOs.\n\n"
-            f"CONTENT:\n{formatted_content}\n\n"
-            f"SUMMARY (Keep it professional and concise, use emojis):"
+            f"You are a linguistic analysis tool for MooPredict AI. Your task is to SUMMARIZE the text provided.\n"
+            f"Do NOT provide financial advice, do NOT predict the market, and do NOT give recommendations.\n"
+            f"Simply extract and list the key events or topics mentioned in the following {platform} data.\n\n"
+            f"DATA TO SUMMARIZE:\n{formatted_content}\n\n"
+            f"SUMMARY (3-5 short bullet points, professional tone, use emojis):"
         )
 
         payload = {
             "model": self.model,
             "prompt": prompt,
-            "stream": False
+            "stream": False,
+            "options": {
+                "temperature": 0.3 # Lower temperature for more factual summaries
+            }
         }
 
         try:
@@ -37,6 +41,13 @@ class AIService:
             if response.status_code == 200:
                 result = response.json()
                 summary = result.get("response", "").strip()
+                
+                # Detect if the AI refused (common in llama models)
+                refusal_keywords = ["cannot provide", "as an ai", "financial advice", "legal advice", "predict the stock", "can't assist", "can't help"]
+                if any(kw in summary.lower() for kw in refusal_keywords):
+                    logger.warning(f"[AIService] AI refused to summarize {platform} content. Using fallback.")
+                    return self._fallback_summary(content_list)
+                    
                 return summary
             else:
                 logger.error(f"[AIService] Error from Ollama: {response.status_code} - {response.text}")
@@ -50,13 +61,20 @@ class AIService:
         payload = {
             "model": self.model,
             "prompt": prompt,
-            "stream": False
+            "stream": False,
+            "options": {
+                "temperature": 0.4
+            }
         }
         try:
             logger.info(f"[AIService] Sending raw query...")
             response = requests.post(self.base_url, json=payload, timeout=120)
             if response.status_code == 200:
-                return response.json().get("response", "").strip()
+                summary = response.json().get("response", "").strip()
+                refusal_keywords = ["cannot provide", "as an ai", "financial advice", "can't assist", "can't help"]
+                if any(kw in summary.lower() for kw in refusal_keywords):
+                    return "⚠️ AI Refusal: Please rephrase or check logs."
+                return summary
             return "⚠️ AI Service Error"
         except Exception as e:
             logger.error(f"[AIService] Query Exception: {e}")

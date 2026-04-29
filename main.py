@@ -21,6 +21,7 @@ from services.options_flow import options_service
 from services.market_research import research_service
 from services.trade_journal import trade_journal
 from services.pattern_service import pattern_service
+from services.alert_service import alert_service
 
 app = FastAPI(title="MooPredict AI API")
 
@@ -159,10 +160,20 @@ def get_sector_detail(symbol: str):
     """Fetch detailed performance for a specific sector ETF."""
     return sector_service.get_sector_detail(symbol)
 
+@app.get("/api/briefing")
+def get_briefing(quick: bool = False):
+    """Fetch structured market and portfolio briefing."""
+    return briefing_service.get_briefing_data(quick=quick)
+
 @app.get("/api/options/{symbol}")
 def get_options_flow(symbol: str):
     """Fetch unusual options activity."""
     return options_service.get_unusual_activity(symbol)
+
+@app.get("/api/implied/{symbol}")
+def get_implied_move(symbol: str):
+    """Fetch implied move from options straddle."""
+    return options_service.get_implied_move(symbol)
 
 @app.get("/api/research/{symbol}")
 def get_market_research(symbol: str):
@@ -179,10 +190,67 @@ def get_journal_stats():
     """Fetch trade statistics."""
     return trade_journal.get_stats()
 
+@app.post("/api/journal/sync")
+def sync_journal(payload: dict = None):
+    """Sync trades from Moomoo."""
+    days = payload.get("days", 30) if payload else 30
+    return trade_journal.sync_past_trades(days)
+
 @app.get("/api/patterns")
 def get_patterns(limit: int = 20):
     """Fetch recorded market patterns."""
     return pattern_service.get_all(limit)
+
+@app.post("/api/patterns")
+def record_pattern(payload: dict):
+    """Record a new market pattern observation."""
+    name = payload.get("name")
+    category = payload.get("category")
+    obs = payload.get("observation")
+    thesis = payload.get("thesis")
+    symbols = payload.get("symbols", "")
+    
+    if not all([name, category, obs, thesis]):
+        raise HTTPException(status_code=400, detail="name, category, observation, and thesis are required")
+        
+    pid = pattern_service.record_pattern(name, category, obs, thesis, symbols)
+    return {"success": True, "pattern_id": pid}
+
+@app.get("/api/alerts")
+def get_alerts():
+    """Fetch active price alerts."""
+    return alert_service.get_active_alerts()
+
+@app.post("/api/alerts")
+def create_alert(payload: dict):
+    """Create a new price alert."""
+    symbol = payload.get("symbol")
+    price = payload.get("price")
+    direction = payload.get("direction", "ABOVE")
+    action = payload.get("action", "notify")
+    
+    if not all([symbol, price, direction]):
+        raise HTTPException(status_code=400, detail="symbol, price, and direction are required")
+        
+    aid = alert_service.add_alert(symbol, price, direction, action)
+    return {"success": True, "alert_id": aid}
+
+@app.post("/api/alerts/check")
+def trigger_alert_check():
+    """Manually trigger a price alert check."""
+    alert_service.check_alerts()
+    return {"success": True, "message": "Alert check triggered"}
+
+@app.post("/api/notify")
+def send_push_notification(payload: dict):
+    """Send a push notification to Telegram via the queue."""
+    message = payload.get("message")
+    level = payload.get("level", "info")
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+    
+    notification_queue.enqueue(message, level)
+    return {"success": True, "message": "Notification enqueued"}
 
 @app.post("/api/trade")
 def place_trade(payload: dict):
@@ -207,7 +275,16 @@ def place_trade(payload: dict):
     if not result["success"]:
         raise HTTPException(status_code=500, detail=result["error"])
         
-    return result
+    # Auto-log to journal
+    trade_id = trade_journal.log_trade(
+        symbol=symbol,
+        side=side,
+        qty=float(qty),
+        price=result.get("data", {}).get("last_price", price) or float(price),
+        order_type=order_type
+    )
+    
+    return {"success": True, "trade_id": trade_id, "data": result.get("data")}
 
 # ─── Webhook (Command Handler) ──────────────────────────────────────────────
 @app.post("/webhook")
@@ -324,10 +401,21 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
         if command == "!earnings" and len(parts) > 1:
             symbol = parts[1].upper()
             data = earnings_service.get_stock_earnings(symbol)
-            if not data.get("success"):
-                return {"content": f"❌ No earnings data found for {symbol}."}
-            dates = ", ".join(data['earnings_dates'])
-            return {"content": f"📅 *{symbol} Earnings:* {dates}\nEst EPS: ${data.get('eps_estimate', 'N/A')}"}
+            date = data['earnings_dates'][0] if data['earnings_dates'] else "Unknown"
+            history = ""
+            if data.get("history"):
+                h = data["history"][0]
+                history = f"\nSurprise: {h['surprise_pct']}% (Last Q)"
+            
+            report = (
+                f"📅 *{symbol} Earnings: {date}*\n"
+                f"──────────────────\n"
+                f"💰 Est EPS: ${data.get('eps_estimate', 'N/A')}\n"
+                f"📉 Prev EPS: ${data.get('previous_eps', 'N/A')}\n"
+                f"🎯 Rating: {data.get('analyst_rating', 'N/A')} (Mean)"
+                f"{history}"
+            )
+            return {"content": report}
 
         if command == "!earnings":
             symbols = db.query(UserWatchlist).all()
@@ -339,6 +427,23 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                     date = r['earnings_dates'][0] if r['earnings_dates'] else "N/A"
                     lines.append(f"• {r['symbol']}: {date}")
             return {"content": "📅 *Upcoming Earnings (Watchlist)*\n──────────────\n" + "\n".join(lines)}
+
+        if command == "!implied" and len(parts) > 1:
+            symbol = parts[1].upper()
+            data = options_service.get_implied_move(symbol)
+            if not data.get("success"):
+                return {"content": f"❌ Error: {data.get('error')}"}
+            
+            report = (
+                f"🎲 *Implied Move: {symbol}*\n"
+                f"──────────────────\n"
+                f"📅 Expiry: {data['expiration']}\n"
+                f"💵 Current: ${data['current_price']}\n"
+                f"📏 Straddle: ${data['straddle_price']}\n"
+                f"📈 Move: ±{data['implied_move_pct']}%\n"
+                f"🎯 Range: ${data['range_lower']} - ${data['range_upper']}"
+            )
+            return {"content": report}
 
         if command == "!sectors":
             results = sector_service.get_sector_performance()
@@ -469,6 +574,17 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
             lines = [f"• #{p['id']} {p['name']} ({p['category']})" for p in patterns]
             return {"content": "🧠 *Market Patterns*\n──────────────\n" + ("\n".join(lines) if lines else "No patterns recorded.")}
 
+        if command == "!alert" and len(parts) > 3:
+            # Usage: !alert SYMBOL DIRECTION PRICE
+            symbol = parts[1].upper()
+            direction = parts[2].upper()
+            try:
+                price = float(parts[3])
+                aid = alert_service.add_alert(symbol, price, direction)
+                return {"content": f"🔔 Alert #{aid} set for {symbol} {direction} {price}"}
+            except:
+                return {"content": "⚠️ Usage: !alert SYMBOL ABOVE|BELOW PRICE"}
+
         if command == "!help":
             return {
                 "content": (
@@ -480,6 +596,7 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                     f"• !rsi SYMBOL — RSI indicator\n"
                     f"• !macd SYMBOL — MACD indicator\n"
                     f"• !earnings [SYMBOL] — earnings calendar\n"
+                    f"• !implied SYMBOL — earnings implied move\n"
                     f"• !sectors — sector heatmap\n"
                     f"• !options SYMBOL — unusual options activity\n"
                     f"• !research SYMBOL — full stock deep-dive\n"

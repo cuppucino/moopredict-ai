@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from futu import *
 from loguru import logger
@@ -14,6 +15,10 @@ class MoomooService:
         self.trd_env: TrdEnv = TrdEnv.REAL
         self.trd_market: TrdMarket = TrdMarket.HK
         self.is_connected: bool = False
+        self._pos_cache = None
+        self._pos_cache_expiry = datetime.now()
+        self._bal_cache = None
+        self._bal_cache_expiry = datetime.now()
 
     def connect(self) -> bool:
         """Initialize connection to OpenD."""
@@ -84,7 +89,10 @@ class MoomooService:
             return False
 
     def get_balance(self) -> Optional[Dict]:
-        """Fetch account balance details."""
+        """Fetch account balance details with 5-min cache."""
+        if self._bal_cache and datetime.now() < self._bal_cache_expiry:
+            return self._bal_cache
+
         if not self.trd_ctx or not self.acc_id:
             return None
         try:
@@ -92,11 +100,14 @@ class MoomooService:
             if ret == RET_OK:
                 # data is a DataFrame
                 info = data.iloc[0]
-                return {
+                result = {
                     "available_cash": float(info['cash']),
                     "total_assets": float(info['total_assets']),
                     "currency": info.get('currency', 'USD')
                 }
+                self._bal_cache = result
+                self._bal_cache_expiry = datetime.now() + timedelta(minutes=5)
+                return result
             else:
                 logger.error(f"Balance query failed: {data}")
                 return None
@@ -105,7 +116,10 @@ class MoomooService:
             return None
 
     def get_positions(self) -> List[Dict]:
-        """Fetch list of open positions."""
+        """Fetch list of open positions with 5-min cache."""
+        if self._pos_cache and datetime.now() < self._pos_cache_expiry:
+            return self._pos_cache
+
         if not self.trd_ctx or not self.acc_id:
             return []
         try:
@@ -120,6 +134,8 @@ class MoomooService:
                         "current_price": float(row['nominal_price']),
                         "pnl_percent": f"{float(row['pl_ratio']):.2f}%"
                     })
+                self._pos_cache = positions
+                self._pos_cache_expiry = datetime.now() + timedelta(minutes=5)
                 return positions
             else:
                 logger.error(f"Position query failed: {data}")
@@ -163,6 +179,51 @@ class MoomooService:
         except Exception as e:
             logger.error(f"[Moomoo] Exception during order: {e}")
             return {"success": False, "error": str(e)}
+
+    def get_trade_history(self, symbol: str = "", start_date: str = "", end_date: str = "") -> List[Dict]:
+        """Fetch historical trade orders."""
+        if not self.trd_ctx or not self.acc_id:
+            return []
+            
+        try:
+            # If no start date, default to last 30 days
+            if not start_date:
+                from datetime import datetime, timedelta
+                start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+            if not end_date:
+                from datetime import datetime
+                end_date = datetime.now().strftime("%Y-%m-%d")
+
+            logger.info(f"[Moomoo] Querying history for {symbol or 'ALL'} from {start_date} to {end_date}...")
+            ret, data = self.trd_ctx.history_order_list_query(
+                code=symbol,
+                start=start_date,
+                end=end_date,
+                trd_env=self.trd_env,
+                acc_id=self.acc_id
+            )
+            
+            if ret == RET_OK:
+                orders = []
+                for _, row in data.iterrows():
+                    # Map to a clean dictionary
+                    orders.append({
+                        "order_id": str(row['order_id']),
+                        "symbol": row['code'],
+                        "side": "BUY" if row['trd_side'] == 'BUY' else "SELL",
+                        "qty": float(row['qty']),
+                        "price": float(row['dealt_avg_price'] or row['price']),
+                        "status": row['order_status'],
+                        "time": row['create_time'],
+                        "order_type": row['order_type']
+                    })
+                return orders
+            else:
+                logger.error(f"[Moomoo] History query failed: {data}")
+                return []
+        except Exception as e:
+            logger.error(f"[Moomoo] Exception during history query: {e}")
+            return []
 
     def close(self):
         """Clean up connections."""

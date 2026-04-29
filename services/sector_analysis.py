@@ -22,8 +22,15 @@ SECTOR_ETFS = {
 }
 
 class SectorAnalysisService:
+    def __init__(self):
+        self._cache = {}
+        self._cache_expiry = datetime.now()
+
     def get_sector_performance(self) -> List[Dict]:
-        """Calculate performance for all major sectors."""
+        """Calculate performance for all major sectors with 1-hour cache."""
+        if self._cache and datetime.now() < self._cache_expiry:
+            return self._cache
+
         logger.info("[Sector] Calculating performance for all sectors...")
         results = []
         
@@ -58,6 +65,11 @@ class SectorAnalysisService:
             
             # Sort by 1-day performance descending
             results.sort(key=lambda x: x['change_1d'], reverse=True)
+            
+            # Update cache (1 hour)
+            self._cache = results
+            self._cache_expiry = datetime.now() + timedelta(hours=1)
+            
             return results
             
         except Exception as e:

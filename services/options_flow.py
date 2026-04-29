@@ -75,4 +75,58 @@ class OptionsFlowService:
             "sentiment": data["sentiment"]
         }
 
+    def get_implied_move(self, symbol: str) -> Dict:
+        """Estimate the implied move based on the nearest ATM straddle."""
+        yf_symbol = symbol.split(".")[-1] if "." in symbol else symbol
+        try:
+            ticker = yf.Ticker(yf_symbol)
+            info = ticker.info
+            current_price = info.get('regularMarketPrice') or info.get('currentPrice')
+            
+            if not current_price:
+                # Fallback to fast_info or history
+                hist = ticker.history(period="1d")
+                if not hist.empty:
+                    current_price = hist['Close'].iloc[-1]
+            
+            if not current_price:
+                return {"error": "Could not fetch current price"}
+                
+            expirations = ticker.options
+            if not expirations:
+                return {"error": "No options found"}
+            
+            # Use nearest expiration
+            nearest_exp = expirations[0]
+            chain = ticker.option_chain(nearest_exp)
+            
+            # Find strike closest to current price
+            calls = chain.calls
+            puts = chain.puts
+            
+            calls['dist'] = (calls['strike'] - current_price).abs()
+            puts['dist'] = (puts['strike'] - current_price).abs()
+            
+            # Use sort_values and take top instead of idxmin for better handling
+            atm_call = calls.sort_values(by='dist').iloc[0]
+            atm_put = puts.sort_values(by='dist').iloc[0]
+            
+            # Use lastPrice or mid price if possible
+            straddle_price = atm_call['lastPrice'] + atm_put['lastPrice']
+            implied_move_pct = (straddle_price / current_price) * 100
+            
+            return {
+                "symbol": symbol,
+                "expiration": nearest_exp,
+                "current_price": round(current_price, 2),
+                "straddle_price": round(straddle_price, 2),
+                "implied_move_pct": round(implied_move_pct, 2),
+                "range_upper": round(current_price * (1 + implied_move_pct/100), 2),
+                "range_lower": round(current_price * (1 - implied_move_pct/100), 2),
+                "success": True
+            }
+        except Exception as e:
+            logger.error(f"[Options] Implied move error for {symbol}: {e}")
+            return {"error": str(e), "success": False}
+
 options_service = OptionsFlowService()

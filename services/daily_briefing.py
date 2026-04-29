@@ -1,4 +1,6 @@
 from datetime import datetime
+import time
+from typing import Dict, List, Optional
 from loguru import logger
 from core.database import SessionLocal, NewsIntel, SocialPost
 from services.moomoo_service import moomoo_service
@@ -82,5 +84,59 @@ class DailyBriefingService:
             f"📊 Check !pos for full P&L breakdown."
         )
         notification_queue.enqueue(message)
+
+    def get_briefing_data(self, quick: bool = False) -> Dict:
+        """Fetch all data components for a briefing. If quick=True, skip AI summary."""
+        db = SessionLocal()
+        start_time = time.time()
+        try:
+            # 1. Get overnight news (last 12 hours)
+            news = db.query(NewsIntel).order_by(NewsIntel.scraped_at.desc()).limit(5).all()
+            news_data = [{"source": n.source, "headline": n.headline, "url": n.url} for n in news]
+            t1 = time.time()
+            logger.debug(f"[Briefing] News fetch took {t1 - start_time:.3f}s")
+            
+            # 2. Get social sentiment
+            social = db.query(SocialPost).order_by(SocialPost.scraped_at.desc()).limit(5).all()
+            social_data = [{"platform": s.platform, "author": s.author, "content": s.content} for s in social]
+            t2 = time.time()
+            logger.debug(f"[Briefing] Social fetch took {t2 - t1:.3f}s")
+            
+            # 3. Get sector status
+            sectors = sector_service.get_sector_performance()[:5]
+            t3 = time.time()
+            logger.debug(f"[Briefing] Sector fetch took {t3 - t2:.3f}s")
+            
+            # 4. Get portfolio summary
+            positions = moomoo_service.get_positions()
+            balance = moomoo_service.get_balance()
+            t4 = time.time()
+            logger.debug(f"[Briefing] Portfolio fetch took {t4 - t3:.3f}s")
+            
+            # 5. Generate AI Summary (cached or new) - SKIP if quick=True
+            ai_summary = "AI summary skipped (Quick Mode)"
+            if not quick:
+                news_lines = [f"- {n.headline}" for n in news]
+                context = "NEWS:\n" + "\n".join(news_lines)
+                prompt = f"Summarize these market catalysts briefly for a professional trader:\n{context}"
+                ai_summary = ai_service.query(prompt) if news_lines else "No significant news to summarize."
+                t5 = time.time()
+                logger.debug(f"[Briefing] AI Summary took {t5 - t4:.3f}s")
+            
+            logger.info(f"[Briefing] Data retrieval complete in {time.time() - start_time:.3f}s")
+            return {
+                "timestamp": datetime.now().isoformat(),
+                "portfolio": {
+                    "balance": balance,
+                    "positions": positions
+                },
+                "sectors": sectors,
+                "news": news_data,
+                "social": social_data,
+                "ai_summary": ai_summary,
+                "mode": "QUICK" if quick else "FULL"
+            }
+        finally:
+            db.close()
 
 briefing_service = DailyBriefingService()

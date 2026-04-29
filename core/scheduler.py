@@ -34,6 +34,10 @@ class Scheduler:
         # 04:00 AM MYT = 20:00 UTC
         self.scheduler.add_job(briefing_service.generate_eod_summary, CronTrigger.from_crontab("0 20 * * *"), id="eod_summary_job")
 
+        # Price Alerts (Every 5 minutes)
+        from services.alert_service import alert_service
+        self.scheduler.add_job(alert_service.check_alerts, CronTrigger.from_crontab("*/5 * * * *"), id="price_alert_job")
+
         self.scheduler.start()
         self.is_running = True
         logger.info("[Scheduler] Jobs scheduled and running.")
