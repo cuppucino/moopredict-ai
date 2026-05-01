@@ -25,9 +25,13 @@ def get_openclaw_config():
 
 oc_config = get_openclaw_config()
 
-# Credentials
+# Main Credentials
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or oc_config.get("channels", {}).get("telegram", {}).get("botToken")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "REMOVED_PRIVATE_VALUE" # Default from old script
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "REMOVED_PRIVATE_VALUE"
+
+# News Credentials (New)
+BOT_TOKEN_NEWS = os.getenv("TELEGRAM_BOT_TOKEN_NEWS")
+CHAT_ID_NEWS = os.getenv("TELEGRAM_CHAT_ID_NEWS")
 
 LEVEL_EMOJI = {
     "info": "ℹ️",
@@ -37,15 +41,30 @@ LEVEL_EMOJI = {
 }
 
 def send_telegram(notif):
+    category = notif.get("category", "general")
     emoji = LEVEL_EMOJI.get(notif.get("level"), "ℹ️")
     message = notif.get("message", "")
+    
+    # Decide which bot and chat to use
+    target_token = BOT_TOKEN
+    target_chat = CHAT_ID
+    
+    if category == "news" and BOT_TOKEN_NEWS:
+        target_token = BOT_TOKEN_NEWS
+        target_chat = CHAT_ID_NEWS or CHAT_ID # Fallback if channel ID not set
+        logger.info(f"Routing to NEWS bot/channel: {target_chat}")
+    
+    if not target_token:
+        logger.error(f"No token available for category: {category}")
+        return False
+
     # Simple HTML escaping
     escaped_message = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     text = f"<b>{emoji} MooPredict</b>\n\n{escaped_message}"
     
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{target_token}/sendMessage"
     payload = {
-        "chat_id": CHAT_ID,
+        "chat_id": target_chat,
         "text": text,
         "parse_mode": "HTML"
     }
@@ -54,11 +73,11 @@ def send_telegram(notif):
         response = requests.post(url, json=payload, timeout=10)
         data = response.json()
         if not data.get("ok"):
-            logger.error(f"Telegram error: {data.get('description')}")
+            logger.error(f"Telegram error ({category}): {data.get('description')}")
             return False
         return True
     except Exception as e:
-        logger.error(f"Failed to send Telegram: {e}")
+        logger.error(f"Failed to send Telegram ({category}): {e}")
         return False
 
 def mark_sent(notification_id):

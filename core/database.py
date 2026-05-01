@@ -103,6 +103,13 @@ class PriceAlert(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     triggered_at = Column(DateTime)
 
+class PCRHistory(Base):
+    __tablename__ = "pcr_history"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), nullable=False)
+    pcr = Column(Float, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
 def init_db():
     """Initialize the database tables."""
     try:

@@ -2,6 +2,8 @@ import yfinance as yf
 import pandas as pd
 from typing import Dict, List, Optional
 from loguru import logger
+from core.database import SessionLocal, PCRHistory
+from services.notifications import notification_queue
 
 class OptionsFlowService:
     def get_unusual_activity(self, symbol: str) -> Dict:
@@ -128,5 +130,43 @@ class OptionsFlowService:
         except Exception as e:
             logger.error(f"[Options] Implied move error for {symbol}: {e}")
             return {"error": str(e), "success": False}
+
+    def monitor_pcr_spikes(self, watchlist: List[str]):
+        """Scan watchlist for Put/Call Ratio spikes and alert."""
+        db = SessionLocal()
+        try:
+            for symbol in watchlist:
+                data = self.get_pcr(symbol)
+                if "error" in data:
+                    continue
+                
+                current_pcr = data["pcr"]
+                
+                # Fetch last recorded PCR
+                last_record = db.query(PCRHistory).filter(PCRHistory.symbol == symbol).order_by(PCRHistory.timestamp.desc()).first()
+                
+                if last_record and last_record.pcr > 0:
+                    spike_ratio = current_pcr / last_record.pcr
+                    if spike_ratio >= 3.0:
+                        msg = (
+                            f"🚨 *PCR SPIKE ALERT: {symbol}*\n"
+                            f"──────────────────\n"
+                            f"Previous PCR: {last_record.pcr}\n"
+                            f"Current PCR: {current_pcr}\n"
+                            f"Spike: {spike_ratio:.1f}x\n"
+                            f"Sentiment: {data['sentiment']}\n\n"
+                            f"⚠️ *Warning:* Heavy options activity detected before earnings."
+                        )
+                        notification_queue.enqueue(msg, level="warning", category="news")
+                
+                # Save current PCR to history
+                new_record = PCRHistory(symbol=symbol, pcr=current_pcr)
+                db.add(new_record)
+                db.commit()
+                
+        except Exception as e:
+            logger.error(f"[Options] PCR monitor error: {e}")
+        finally:
+            db.close()
 
 options_service = OptionsFlowService()

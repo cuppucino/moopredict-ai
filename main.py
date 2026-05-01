@@ -22,6 +22,8 @@ from services.market_research import research_service
 from services.trade_journal import trade_journal
 from services.pattern_service import pattern_service
 from services.alert_service import alert_service
+from services.risk_service import risk_service
+from market_movers_endpoint import get_market_movers
 
 app = FastAPI(title="MooPredict AI API")
 
@@ -165,6 +167,11 @@ def get_briefing(quick: bool = False):
     """Fetch structured market and portfolio briefing."""
     return briefing_service.get_briefing_data(quick=quick)
 
+@app.get("/api/market/movers")
+async def market_movers(limit: int = 10):
+    """Fetch top gainers, losers, and most active stocks."""
+    return await get_market_movers(limit)
+
 @app.get("/api/options/{symbol}")
 def get_options_flow(symbol: str):
     """Fetch unusual options activity."""
@@ -179,6 +186,11 @@ def get_implied_move(symbol: str):
 def get_market_research(symbol: str):
     """Generate a full AI deep-dive research report."""
     return {"report": research_service.perform_deep_dive(symbol)}
+
+@app.get("/api/risk/size")
+def get_position_size(symbol: str, price: float, risk: float = 10.0):
+    """Calculate recommended position size."""
+    return risk_service.calculate_position_size(symbol, price, risk)
 
 @app.get("/api/journal")
 def get_journal(limit: int = 20):
@@ -241,29 +253,58 @@ def trigger_alert_check():
     alert_service.check_alerts()
     return {"success": True, "message": "Alert check triggered"}
 
+@app.delete("/api/alerts/{alert_id}")
+def delete_alert(alert_id: int):
+    """Delete a price alert."""
+    if alert_service.delete_alert(alert_id):
+        return {"success": True, "message": f"Alert {alert_id} deleted"}
+    raise HTTPException(status_code=404, detail="Alert not found")
+
 @app.post("/api/notify")
 def send_push_notification(payload: dict):
     """Send a push notification to Telegram via the queue."""
     message = payload.get("message")
     level = payload.get("level", "info")
+    category = payload.get("category", "general")
     if not message:
         raise HTTPException(status_code=400, detail="message is required")
     
-    notification_queue.enqueue(message, level)
-    return {"success": True, "message": "Notification enqueued"}
+    notification_queue.enqueue(message, level, category)
+    return {"success": True, "message": f"Notification enqueued in {category}"}
+
+@app.post("/api/test/notifications")
+def test_notifications(type: str = "open", category: str = "general"):
+    """Manually trigger notifications for testing."""
+    if type == "open":
+        notification_queue.enqueue("🔔 *TEST: US Market is OPEN!* 📈", "info", category)
+    elif type == "close":
+        notification_queue.enqueue("🔔 *TEST: US Market is closing in 5 minutes!* 📉", "warning", category)
+    return {"success": True, "message": f"Test {type} notification enqueued in {category}"}
 
 @app.post("/api/trade")
 def place_trade(payload: dict):
-    """API endpoint to place a trade."""
-    symbol = payload.get("symbol")
+    """API endpoint to place a trade with safety checks."""
+    symbol = payload.get("symbol", "").upper().strip()
     qty = payload.get("qty")
-    side = payload.get("side")
+    side = payload.get("side", "").upper().strip()
     order_type = payload.get("order_type", "MARKET")
     price = payload.get("price", 0.0)
     
     if not all([symbol, qty, side]):
         raise HTTPException(status_code=400, detail="symbol, qty, and side are required")
         
+    # 🔴 Rule: Check earnings before trading
+    earnings = earnings_service.get_stock_earnings(symbol)
+    if earnings.get("earnings_dates"):
+        try:
+            next_date = datetime.strptime(earnings["earnings_dates"][0], "%Y-%m-%d")
+            days_to_earnings = (next_date - datetime.now()).days
+            if days_to_earnings <= 3 and days_to_earnings >= 0:
+                logger.warning(f"[Trade] EARNINGS BLOCK: {symbol} has earnings in {days_to_earnings} days.")
+                raise HTTPException(status_code=400, detail=f"Earnings catalyst within {days_to_earnings} days. Rule: HOLD through earnings.")
+        except Exception as e:
+            logger.error(f"[Trade] Earnings date parse error: {e}")
+
     result = moomoo_service.place_order(
         symbol=symbol,
         qty=float(qty),
@@ -284,6 +325,13 @@ def place_trade(payload: dict):
         order_type=order_type
     )
     
+    # 🛡️ Rule: Auto stop-loss on buy
+    if side == "BUY":
+        current_price = result.get("data", {}).get("last_price", price) or float(price)
+        stop_price = float(current_price) * 0.90 # -10%
+        alert_id = alert_service.add_alert(symbol, stop_price, "BELOW", action="notify")
+        logger.info(f"[Trade] Auto stop-loss set for {symbol} at {stop_price:.2f} (Alert #{alert_id})")
+
     return {"success": True, "trade_id": trade_id, "data": result.get("data")}
 
 # ─── Webhook (Command Handler) ──────────────────────────────────────────────
@@ -489,17 +537,37 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 price = float(parts[3]) if len(parts) > 3 else 0.0
                 order_type = "LIMIT" if price > 0 else "MARKET"
                 
+                # 🔴 Rule: Check earnings before trading
+                earnings = earnings_service.get_stock_earnings(symbol)
+                if earnings.get("earnings_dates"):
+                    try:
+                        next_date = datetime.strptime(earnings["earnings_dates"][0], "%Y-%m-%d")
+                        days_to_earnings = (next_date - datetime.now()).days
+                        if days_to_earnings <= 3 and days_to_earnings >= 0:
+                            return {"content": f"⚠️ *EARNINGS BLOCK*\n{symbol} has earnings in {days_to_earnings} days.\nRule: HOLD through earnings catalyst."}
+                    except Exception as e:
+                        logger.error(f"[Trade] Earnings date parse error: {e}")
+
                 result = moomoo_service.place_order(symbol, qty, side, order_type, price)
                 if result["success"]:
                     # Auto-log to journal
+                    last_price = result.get("data", {}).get("last_price", price) or price
                     trade_id = trade_journal.log_trade(
                         symbol=symbol,
                         side=side,
                         qty=qty,
-                        price=result.get("data", {}).get("last_price", price) or price,
+                        price=last_price,
                         order_type=order_type
                     )
-                    return {"content": f"✅ *Trade Success*\nOrdered {qty} {symbol} ({side})\nJournaled as Trade #{trade_id}"}
+                    
+                    # 🛡️ Rule: Auto stop-loss on buy
+                    alert_msg = ""
+                    if side == "BUY":
+                        stop_price = float(last_price) * 0.90 # -10%
+                        aid = alert_service.add_alert(symbol, stop_price, "BELOW")
+                        alert_msg = f"\n🛡️ Auto stop-loss set at ${stop_price:.2f} (Alert #{aid})"
+
+                    return {"content": f"✅ *Trade Success*\nOrdered {qty} {symbol} ({side})\nJournaled as Trade #{trade_id}{alert_msg}"}
                 else:
                     return {"content": f"❌ *Trade Failed*\n{result['error']}"}
             except ValueError:
@@ -574,6 +642,31 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
             lines = [f"• #{p['id']} {p['name']} ({p['category']})" for p in patterns]
             return {"content": "🧠 *Market Patterns*\n──────────────\n" + ("\n".join(lines) if lines else "No patterns recorded.")}
 
+        if command == "!size" and len(parts) > 1:
+            symbol = parts[1].upper()
+            # Try to get price from technical analysis
+            analysis = ta_service.get_full_analysis(symbol)
+            price = analysis.get("price")
+            if not price or "error" in analysis:
+                return {"content": f"❌ Could not fetch price for {symbol}."}
+            
+            risk_pct = float(parts[2]) if len(parts) > 2 else 10.0
+            size = risk_service.calculate_position_size(symbol, price, risk_pct)
+            
+            if "error" in size:
+                return {"content": f"❌ Risk Calculation Error: {size['error']}"}
+                
+            report = (
+                f"📏 *Position Sizing: {symbol}*\n"
+                f"──────────────────\n"
+                f"💵 Price: ${price:.2f}\n"
+                f"🛡️ Stop-Loss: ${size['stop_loss_price']:.2f} (-10%)\n"
+                f"🎯 Recommended: *{size['recommended_shares']} shares*\n"
+                f"💰 Total Cost: ${size['total_cost']:,.2f}\n"
+                f"📊 Allocation: {size['allocation_percent']}% of portfolio"
+            )
+            return {"content": report}
+
         if command == "!alert" and len(parts) > 3:
             # Usage: !alert SYMBOL DIRECTION PRICE
             symbol = parts[1].upper()
@@ -584,6 +677,15 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"content": f"🔔 Alert #{aid} set for {symbol} {direction} {price}"}
             except:
                 return {"content": "⚠️ Usage: !alert SYMBOL ABOVE|BELOW PRICE"}
+
+        if command == "!rmalert" and len(parts) > 1:
+            try:
+                aid = int(parts[1])
+                if alert_service.delete_alert(aid):
+                    return {"content": f"🗑️ Alert #{aid} deleted."}
+                return {"content": f"❌ Alert #{aid} not found."}
+            except:
+                return {"content": "⚠️ Usage: !rmalert ALERT_ID"}
 
         if command == "!help":
             return {

@@ -7,12 +7,13 @@ class NotificationQueue:
         self.queue: List[Dict] = []
         self.max_size = max_size
 
-    def enqueue(self, message: str, level: str = "info"):
-        """Add a new notification to the queue."""
+    def enqueue(self, message: str, level: str = "info", category: str = "general"):
+        """Add a new notification to the queue with a category for routing."""
         notification = {
             "id": str(uuid.uuid4()),
             "message": message,
             "level": level,
+            "category": category.lower(),
             "sent": False,
             "created_at": datetime.utcnow().isoformat()
         }

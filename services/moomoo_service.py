@@ -21,25 +21,32 @@ class MoomooService:
         self._bal_cache_expiry = datetime.now()
 
     def connect(self) -> bool:
-        """Initialize connection to OpenD."""
-        try:
-            logger.info(f"Connecting to Moomoo OpenD at {self.host}:{self.port}...")
-            self.trd_ctx = OpenSecTradeContext(host=self.host, port=self.port)
-            self.quote_ctx = OpenQuoteContext(host=self.host, port=self.port)
-            
-            # Simple check to see if we can get account list
-            ret, data = self.trd_ctx.get_acc_list()
-            if ret == RET_OK:
-                logger.info("Successfully connected to Moomoo OpenD")
-                self.is_connected = True
-                self._initialize_account(data)
-                return True
-            else:
-                logger.error(f"Connection failed: {data}")
-                return False
-        except Exception as e:
-            logger.error(f"Unexpected error during connection: {e}")
-            return False
+        """Initialize connection to OpenD with dynamic IP detection."""
+        target_ips = [self.host, "127.0.0.1", "192.168.100.90", "192.168.0.33"]
+        # Remove duplicates while preserving order
+        target_ips = list(dict.fromkeys(target_ips))
+        
+        for ip in target_ips:
+            try:
+                logger.info(f"[Moomoo] Trying to connect to OpenD at {ip}:{self.port}...")
+                self.trd_ctx = OpenSecTradeContext(host=ip, port=self.port)
+                self.quote_ctx = OpenQuoteContext(host=ip, port=self.port)
+                
+                ret, data = self.trd_ctx.get_acc_list()
+                if ret == RET_OK:
+                    logger.success(f"[Moomoo] Connected successfully to {ip}")
+                    self.host = ip
+                    self.is_connected = True
+                    self._initialize_account(data)
+                    return True
+                else:
+                    logger.warning(f"[Moomoo] Connection to {ip} failed: {data}")
+                    self.close() # Clean up failed contexts
+            except Exception as e:
+                logger.warning(f"[Moomoo] Unexpected error connecting to {ip}: {e}")
+                
+        logger.error("[Moomoo] Failed to connect to any target IP.")
+        return False
 
     def _initialize_account(self, acc_list_df):
         """Identify and set the correct trading account."""

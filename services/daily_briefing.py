@@ -47,7 +47,7 @@ class DailyBriefingService:
                 f"💡 *Tip:* Use !ta SYMBOL for specific deep-dives."
             )
             
-            notification_queue.enqueue(message)
+            notification_queue.enqueue(message, category="news")
             logger.info("[Briefing] Morning Briefing sent to queue.")
             
         finally:
@@ -69,7 +69,7 @@ class DailyBriefingService:
             f"*Current Positions:* \n" + "\n".join(pos_lines) + "\n\n"
             f"📈 Watch for volatility at 9:30 PM open."
         )
-        notification_queue.enqueue(message)
+        notification_queue.enqueue(message, category="news")
 
     def generate_eod_summary(self):
         """04:00 AM MYT - End of day performance recap."""
@@ -83,7 +83,7 @@ class DailyBriefingService:
             f"💰 Portfolio Value: {assets}\n"
             f"📊 Check !pos for full P&L breakdown."
         )
-        notification_queue.enqueue(message)
+        notification_queue.enqueue(message, category="news")
 
     def get_briefing_data(self, quick: bool = False) -> Dict:
         """Fetch all data components for a briefing. If quick=True, skip AI summary."""

@@ -35,6 +35,24 @@ class AlertService:
         finally:
             db.close()
 
+    def delete_alert(self, alert_id: int) -> bool:
+        """Delete an alert (mark as DELETED or remove)."""
+        db = SessionLocal()
+        try:
+            alert = db.query(PriceAlert).filter(PriceAlert.id == alert_id).first()
+            if alert:
+                db.delete(alert)
+                db.commit()
+                logger.info(f"[Alerts] Deleted alert #{alert_id}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[Alerts] Error deleting alert: {e}")
+            db.rollback()
+            return False
+        finally:
+            db.close()
+
     def check_alerts(self):
         """Check all active alerts against current prices."""
         db = SessionLocal()
@@ -96,6 +114,6 @@ class AlertService:
             f"Action: {alert.action.upper()}"
         )
         
-        notification_queue.add_notification("ALERT", msg)
+        notification_queue.enqueue(msg, level="alert", category="news")
 
 alert_service = AlertService()
