@@ -110,6 +110,25 @@ class PCRHistory(Base):
     pcr = Column(Float, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
+class Prediction(Base):
+    __tablename__ = "predictions"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), nullable=False)
+    direction = Column(String(10), nullable=False)  # UP | DOWN | FLAT
+    confidence = Column(Float, nullable=False)  # 0-100
+    catalyst = Column(Text, nullable=False)
+    category = Column(String(30), default="general")  # earnings | sector | technical | fundamental
+    timeframe_days = Column(Integer, default=7)
+    entry_price = Column(Float)  # price at time of prediction
+    target_price = Column(Float)  # optional price target
+    deadline = Column(DateTime)  # when to auto-resolve
+    outcome = Column(String(10))  # RIGHT | WRONG | PARTIAL | None (pending)
+    actual_move_pct = Column(Float)  # actual % move at resolution
+    exit_price = Column(Float)  # price at resolution
+    notes = Column(Text)  # post-resolution notes / lessons
+    resolved_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 def init_db():
     """Initialize the database tables."""
     try:

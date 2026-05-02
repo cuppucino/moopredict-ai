@@ -64,7 +64,7 @@ class RedditScraper:
                     f"{summary}\n\n"
                     f"📈 *New Posts:* {new_count}"
                 )
-                notification_queue.enqueue(message)
+                notification_queue.enqueue(message, category="news")
                 logger.info(f"[RedditScraper] Check complete. Sent AI summary for {new_count} posts.")
             else:
                 logger.info("[RedditScraper] No new posts found.")

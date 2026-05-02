@@ -60,6 +60,14 @@ class Scheduler:
         
         self.scheduler.add_job(pcr_job, CronTrigger.from_crontab("0 * * * *"), id="pcr_spike_job")
 
+        # Prediction Auto-Resolve (Every 6 hours)
+        from services.prediction_service import prediction_service
+        self.scheduler.add_job(prediction_service.resolve_pending_predictions, CronTrigger.from_crontab("0 */6 * * *"), id="prediction_resolve_job")
+
+        # Weekly Outlook (Sunday 10:00 AM MYT = 02:00 UTC)
+        from services.outlook_service import outlook_service
+        self.scheduler.add_job(outlook_service.generate_weekly_outlook, CronTrigger.from_crontab("0 2 * * 0"), id="weekly_outlook_job")
+
         self.scheduler.start()
         self.is_running = True
         logger.info("[Scheduler] Jobs scheduled and running.")

@@ -17,6 +17,9 @@ SECTOR_ETFS = {
     "XLRE": "Real Estate",
     "XLC": "Communication",
     "URA": "Uranium",
+    "IGV": "Software",
+    "SMH": "Semiconductors",
+    "IBIT": "Crypto/Bitcoin",
     "SPY": "S&P 500 (Market)",
     "QQQ": "Nasdaq (Tech)"
 }

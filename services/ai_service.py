@@ -1,6 +1,7 @@
 import requests
 import json
 from loguru import logger
+from typing import Dict, List, Optional
 
 class AIService:
     def __init__(self, model: str = "llama3.2:1b", base_url: str = "http://localhost:11434"):
@@ -79,6 +80,28 @@ class AIService:
         except Exception as e:
             logger.error(f"[AIService] Query Exception: {e}")
             return "⚠️ AI Exception"
+
+    def query_json(self, prompt: str) -> Dict:
+        """Send a prompt to the AI and expect a JSON response."""
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "options": {
+                "temperature": 0.2
+            }
+        }
+        try:
+            logger.info(f"[AIService] Sending JSON query...")
+            response = requests.post(self.base_url, json=payload, timeout=120)
+            if response.status_code == 200:
+                content = response.json().get("response", "").strip()
+                return json.loads(content)
+            return {"error": "AI Service Error"}
+        except Exception as e:
+            logger.error(f"[AIService] JSON Query Exception: {e}")
+            return {"error": str(e)}
 
     def _fallback_summary(self, content_list: list) -> str:
         """

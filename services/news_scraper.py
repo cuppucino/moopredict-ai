@@ -64,7 +64,7 @@ class NewsScraper:
                     f"{summary}\n\n"
                     f"📈 *New Articles:* {len(new_headlines)}"
                 )
-                notification_queue.enqueue(message)
+                notification_queue.enqueue(message, category="news")
                 logger.info(f"[NewsScraper] Scrape complete. Sent AI summary for {len(new_headlines)} headlines.")
             else:
                 logger.info("[NewsScraper] No new articles found.")

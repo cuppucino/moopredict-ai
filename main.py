@@ -23,6 +23,8 @@ from services.trade_journal import trade_journal
 from services.pattern_service import pattern_service
 from services.alert_service import alert_service
 from services.risk_service import risk_service
+from services.prediction_service import prediction_service
+from services.outlook_service import outlook_service
 from market_movers_endpoint import get_market_movers
 
 app = FastAPI(title="MooPredict AI API")
@@ -271,6 +273,49 @@ def send_push_notification(payload: dict):
     
     notification_queue.enqueue(message, level, category)
     return {"success": True, "message": f"Notification enqueued in {category}"}
+
+# ─── Predictions ─────────────────────────────────────────────────────────────
+@app.get("/api/predictions")
+def get_predictions(active: bool = True):
+    if active:
+        return prediction_service.get_active()
+    return []
+
+@app.post("/api/predictions")
+def create_prediction(payload: dict):
+    symbol = payload.get("symbol")
+    direction = payload.get("direction")
+    confidence = payload.get("confidence")
+    catalyst = payload.get("catalyst")
+    if not all([symbol, direction, confidence, catalyst]):
+        raise HTTPException(status_code=400, detail="Missing required fields")
+    
+    return prediction_service.create_prediction(
+        symbol=symbol,
+        direction=direction,
+        confidence=float(confidence),
+        catalyst=catalyst,
+        category=payload.get("category", "general"),
+        timeframe_days=int(payload.get("timeframe", 7))
+    )
+
+@app.get("/api/predictions/stats")
+def get_prediction_stats():
+    return prediction_service.get_stats()
+
+@app.get("/api/predscore")
+def get_predscore_alias():
+    """Alias for /api/predictions/stats as requested by user."""
+    return prediction_service.get_stats()
+
+@app.post("/api/outlook/generate")
+def trigger_outlook():
+    return {"report": outlook_service.generate_weekly_outlook()}
+
+@app.get("/api/outlook")
+def get_outlook_alias():
+    """Alias for generating outlook via GET as requested by user."""
+    return {"report": outlook_service.generate_weekly_outlook()}
 
 @app.post("/api/test/notifications")
 def test_notifications(type: str = "open", category: str = "general"):
@@ -687,6 +732,42 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
             except:
                 return {"content": "⚠️ Usage: !rmalert ALERT_ID"}
 
+        if command == "!predict" and len(parts) >= 5:
+            # Usage: !predict SYMBOL DIRECTION CONFIDENCE "CATALYST" [DAYS]
+            symbol = parts[1].upper()
+            direction = parts[2].upper()
+            try:
+                confidence = float(parts[3])
+                # Find catalyst in quotes if exists, or just take the rest
+                text_blob = " ".join(parts[4:])
+                import re
+                quotes = re.findall(r'"(.*?)"', text_blob)
+                catalyst = quotes[0] if quotes else text_blob.split('"')[0].strip()
+                
+                res = prediction_service.create_prediction(symbol, direction, confidence, catalyst)
+                if res["success"]:
+                    return {"content": f"🔮 *Prediction #{res['prediction_id']} Recorded*\n{symbol} {direction} @ ${res['entry_price']:.2f}\nConfidence: {confidence}%\nCatalyst: {catalyst}"}
+                return {"content": f"❌ Error: {res['error']}"}
+            except:
+                return {"content": "⚠️ Usage: !predict SYMBOL UP|DOWN|FLAT CONF \"CATALYST\""}
+
+        if command == "!outlook":
+            report = outlook_service.generate_weekly_outlook()
+            return {"content": "🚀 Weekly Outlook triggered! Check Telegram."}
+
+        if command == "!predscore":
+            stats = prediction_service.get_stats()
+            cats = "\n".join([f"• {k}: {v}%" for k, v in stats.get('by_category', {}).items()])
+            return {
+                "content": (
+                    f"🎯 *Prediction Scorecard*\n"
+                    f"──────────────────\n"
+                    f"📈 Total Resolved: {stats['total_resolved']}\n"
+                    f"🎯 Win Rate: {stats['accuracy_pct']}%\n\n"
+                    f"*By Category:*\n{cats}"
+                )
+            }
+
         if command == "!help":
             return {
                 "content": (
@@ -707,6 +788,10 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                     f"• !lesson ID TEXT — record post-trade lesson\n"
                     f"• !pattern NAME CAT OBS THESIS — record pattern\n"
                     f"• !patterns — list patterns\n"
+                    f"• !alert SYMBOL DIRECTION PRICE — set price alert\n"
+                    f"• !predict SYMBOL DIR CONF \"CAT\" — record prediction\n"
+                    f"• !predscore — view prediction accuracy\n"
+                    f"• !outlook — generate weekly outlook\n"
                     f"• !briefing — manual daily report\n"
                     f"• !watchlist — show watchlist\n"
                     f"• !add SYMBOL — add to watchlist\n"

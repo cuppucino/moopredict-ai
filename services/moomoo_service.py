@@ -232,6 +232,48 @@ class MoomooService:
             logger.error(f"[Moomoo] Exception during history query: {e}")
             return []
 
+    def get_stock_quote(self, symbol: str) -> Dict:
+        """Fetch real-time quote for a symbol with market snapshot fallback."""
+        if not self.quote_ctx:
+            if not self.connect():
+                return {"success": False, "error": "Not connected"}
+
+        if "." not in symbol:
+            symbol = f"US.{symbol}"
+            
+        try:
+            # 1. Try standard quote first
+            self.quote_ctx.subscribe([symbol], [SubType.QUOTE])
+            ret, data = self.quote_ctx.get_stock_quote([symbol])
+            
+            last_price = 0.0
+            if ret == RET_OK:
+                last_price = float(data.iloc[0]['last_price'])
+            
+            # 2. Fallback to Snapshot if price is 0.0 or failed
+            if last_price <= 0.0:
+                logger.info(f"[Moomoo] Quote returned 0.0 for {symbol}. Trying market snapshot...")
+                ret, data = self.quote_ctx.get_market_snapshot([symbol])
+                if ret == RET_OK:
+                    last_price = float(data.iloc[0]['last_price'])
+                else:
+                    # Final attempt: get_cur_kline
+                    ret, df = self.quote_ctx.get_cur_kline(symbol, 1, SubType.K_DAY)
+                    if ret == RET_OK:
+                        last_price = float(df['close'].iloc[-1])
+
+            if last_price > 0:
+                return {
+                    "symbol": symbol,
+                    "last_price": last_price,
+                    "timestamp": datetime.now().isoformat()
+                }
+            
+            return {"success": False, "error": f"Failed to get price for {symbol}"}
+        except Exception as e:
+            logger.error(f"[Moomoo] Quote exception for {symbol}: {e}")
+            return {"success": False, "error": str(e)}
+
     def close(self):
         """Clean up connections."""
         if self.trd_ctx:
