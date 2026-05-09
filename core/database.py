@@ -64,6 +64,7 @@ class TradeJournal(Base):
     external_id = Column(String(50), unique=True, index=True)
     entry_time = Column(DateTime, default=datetime.utcnow)
     exit_time = Column(DateTime)
+    strategy = Column(String(30)) # MOMENTUM | MEAN_REVERSION | BREAKOUT
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class PatternDB(Base):
@@ -110,6 +111,29 @@ class PCRHistory(Base):
     pcr = Column(Float, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
+class DrawdownTracker(Base):
+    __tablename__ = "drawdown_tracker"
+    id = Column(Integer, primary_key=True, index=True)
+    peak_value = Column(Float, nullable=False)
+    current_value = Column(Float)
+    drawdown_pct = Column(Float, default=0.0)
+    is_blocked = Column(Boolean, default=False)
+    blocked_reason = Column(Text)
+    last_updated = Column(DateTime, default=datetime.utcnow)
+
+class TrailingStop(Base):
+    __tablename__ = "trailing_stops"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), nullable=False)
+    entry_price = Column(Float, nullable=False)
+    highest_price = Column(Float, nullable=False)
+    trail_pct = Column(Float, default=5.0)
+    stop_price = Column(Float, nullable=False)
+    trade_id = Column(Integer, ForeignKey("trade_journal.id"))
+    status = Column(String(20), default="ACTIVE") # ACTIVE | TRIGGERED | CANCELLED
+    created_at = Column(DateTime, default=datetime.utcnow)
+    triggered_at = Column(DateTime)
+
 class Prediction(Base):
     __tablename__ = "predictions"
     id = Column(Integer, primary_key=True, index=True)
@@ -126,6 +150,7 @@ class Prediction(Base):
     actual_move_pct = Column(Float)  # actual % move at resolution
     exit_price = Column(Float)  # price at resolution
     notes = Column(Text)  # post-resolution notes / lessons
+    pattern_id = Column(Integer, ForeignKey("pattern_database.id"))
     resolved_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
 

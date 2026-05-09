@@ -56,16 +56,27 @@ class NewsScraper:
                 from services.ai_service import ai_service
                 summary = ai_service.summarize_content("News", new_headlines)
                 
+                # Cross-reference with confirmed patterns
+                from services.pattern_service import pattern_service
+                patterns = pattern_service.get_all(limit=10)
+                matched_rules = []
+                for p in patterns:
+                    if p["confirmed"] and (p["category"].lower() in summary.lower() or any(p["category"].lower() in h.lower() for h in new_headlines)):
+                        matched_rules.append(f"💡 *Rule Match:* {p['name']} - {p['observation']}")
+                
+                rules_text = "\n\n" + "\n".join(matched_rules) if matched_rules else ""
+                
                 timestamp = datetime.now().strftime("%H:%M")
                 message = (
                     f"───────────────────────────\n"
                     f"📰 NEWS INTEL — {timestamp}\n"
                     f"───────────────────────────\n"
-                    f"{summary}\n\n"
+                    f"{summary}"
+                    f"{rules_text}\n\n"
                     f"📈 *New Articles:* {len(new_headlines)}"
                 )
                 notification_queue.enqueue(message, category="news")
-                logger.info(f"[NewsScraper] Scrape complete. Sent AI summary for {len(new_headlines)} headlines.")
+                logger.info(f"[NewsScraper] Scrape complete. Sent AI summary and rules for {len(new_headlines)} headlines.")
             else:
                 logger.info("[NewsScraper] No new articles found.")
                 

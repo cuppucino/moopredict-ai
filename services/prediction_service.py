@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 from core.database import SessionLocal, Prediction
 from services.moomoo_service import moomoo_service
 
+from services.validation_service import validation_service
+
 class PredictionService:
     def create_prediction(
         self, 
@@ -14,15 +16,32 @@ class PredictionService:
         catalyst: str, 
         category: str = "general", 
         timeframe_days: int = 7,
-        target_price: Optional[float] = None
+        target_price: Optional[float] = None,
+        pattern_id: Optional[int] = None,
+        force: bool = False
     ) -> Dict:
         """
-        Record a new market prediction.
+        Record a new market prediction with safety checks.
         """
         db = SessionLocal()
         try:
             symbol = symbol.upper().strip()
             direction = direction.upper().strip()
+            
+            # ─── Safety Checks ──────────────────────────────────────────────────
+            if not force:
+                v_res = validation_service.validate_prediction(symbol, direction)
+                if not v_res["passed"]:
+                    logger.warning(f"[Prediction] Safety check FAILED for {symbol}: {v_res['warnings']}")
+                    return {
+                        "success": False, 
+                        "error": "Safety check failed.", 
+                        "warnings": v_res["warnings"],
+                        "can_override": True
+                    }
+                elif v_res["warnings"]:
+                    logger.info(f"[Prediction] Safety check WARNINGS for {symbol}: {v_res['warnings']}")
+                    # We still proceed but include warnings in the result
             
             # Fetch current price for entry
             price_data = moomoo_service.get_stock_quote(symbol)
@@ -39,6 +58,7 @@ class PredictionService:
                 timeframe_days=timeframe_days,
                 entry_price=entry_price,
                 target_price=target_price,
+                pattern_id=pattern_id,
                 deadline=deadline,
                 created_at=datetime.utcnow()
             )
@@ -48,7 +68,16 @@ class PredictionService:
             db.refresh(prediction)
             
             logger.info(f"[Prediction] Recorded #{prediction.id} for {symbol} ({direction})")
-            return {"success": True, "prediction_id": prediction.id, "entry_price": entry_price}
+            
+            # If there were warnings even though it passed, return them
+            v_res = validation_service.validate_prediction(symbol, direction) if not force else {"warnings": []}
+            
+            return {
+                "success": True, 
+                "prediction_id": prediction.id, 
+                "entry_price": entry_price,
+                "warnings": v_res.get("warnings", [])
+            }
             
         except Exception as e:
             logger.error(f"[Prediction] Create error: {e}")

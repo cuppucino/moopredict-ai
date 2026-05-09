@@ -1,14 +1,17 @@
 #!/bin/bash
 
 # Configuration
-IP_ADDR="192.168.0.33"
+IP_ADDR="127.0.0.1"
 PORT="3001"
 BASE_URL="http://$IP_ADDR:$PORT"
 
-# Define cron jobs
-CRON_OPEN="30 13 * * 1-5 curl -s -X POST $BASE_URL/api/notify -H 'Content-Type: application/json' -d '{\"message\": \"🚨 Market opens in 30 minutes!\", \"level\": \"alert\"}' > /dev/null"
-CRON_CLOSE="0 20 * * 1-5 curl -s -X POST $BASE_URL/api/notify -H 'Content-Type: application/json' -d '{\"message\": \"📊 Market closed. Generating report...\", \"level\": \"info\"}' > /dev/null"
-CRON_CHECK="0 14-21 * * 1-5 curl -s -X POST $BASE_URL/api/alerts/check > /dev/null"
+# Define cron jobs (Times adjusted for Malaysia Time - MYT)
+# 13:00 UTC = 21:00 MYT (9:00 PM) - 30 min before open
+CRON_OPEN="00 21 * * 1-5 curl -s -X POST $BASE_URL/api/notify -H 'Content-Type: application/json' -d '{\"message\": \"🚨 Market opens in 30 minutes!\", \"level\": \"alert\"}' > /dev/null"
+# 21:00 UTC = 05:00 MYT (5:00 AM) - Market close
+CRON_CLOSE="00 05 * * 2-6 curl -s -X POST $BASE_URL/api/notify -H 'Content-Type: application/json' -d '{\"message\": \"📊 Market closed. Generating report...\", \"level\": \"info\"}' > /dev/null"
+# Check alerts hourly during US market hours (21:00 - 05:00 MYT)
+CRON_CHECK="0 21,22,23,0,1,2,3,4 * * 2-6 curl -s -X POST $BASE_URL/api/alerts/check > /dev/null"
 
 # Get current crontab, excluding existing MooPredict jobs if any to avoid duplicates
 CURRENT_CRON=$(crontab -l 2>/dev/null | grep -v "moopredict-ai")

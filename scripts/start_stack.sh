@@ -17,6 +17,12 @@ echo "📬 Starting Poller (Python)..."
   python3 scripts/notify_poller.py >> logs/poller.log 2>&1
 ) &
 
-# 2. Start Server
+# 2. Start Prediction Resolver
+echo "⚖️  Starting Prediction Resolver..."
+(
+  python3 scripts/prediction_resolver.py >> logs/resolver.log 2>&1
+) &
+
+# 3. Start Server
 echo "🧠 Starting Server (Python)..."
 python3 main.py

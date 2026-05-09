@@ -42,6 +42,25 @@ class PatternService:
         finally:
             db.close()
 
+    def get_confirmed_lessons(self, symbol: Optional[str] = None) -> str:
+        """Fetch all confirmed patterns/lessons as a formatted string for AI context."""
+        db = SessionLocal()
+        try:
+            query = db.query(PatternDB).filter(PatternDB.confirmed == True)
+            if symbol:
+                query = query.filter(PatternDB.symbols.contains(symbol))
+            
+            patterns = query.order_by(PatternDB.last_seen.desc()).limit(10).all()
+            if not patterns:
+                return ""
+            
+            context = "\n### RELEVANT LESSONS & PATTERNS TO FOLLOW:\n"
+            for p in patterns:
+                context += f"- [{p.category}] {p.name}: {p.observation} -> {p.thesis}\n"
+            return context
+        finally:
+            db.close()
+
     def get_all(self, limit: int = 20) -> List[Dict]:
         db = SessionLocal()
         try:

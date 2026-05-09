@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 from typing import List, Dict
+from loguru import logger
 
 class NotificationQueue:
     def __init__(self, max_size: int = 100):
@@ -18,6 +19,7 @@ class NotificationQueue:
             "created_at": datetime.utcnow().isoformat()
         }
         self.queue.append(notification)
+        logger.info(f"[Queue] Enqueued {level.upper()} notification ({category}): {message[:50]}...")
         
         # Keep queue size within limits
         if len(self.queue) > self.max_size:

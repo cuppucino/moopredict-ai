@@ -1,7 +1,9 @@
 import requests
 import json
+import time
 from loguru import logger
 from typing import Dict, List, Optional
+from services.pattern_service import pattern_service
 
 class AIService:
     def __init__(self, model: str = "llama3.2:1b", base_url: str = "http://localhost:11434"):
@@ -15,14 +17,23 @@ class AIService:
         if not content_list:
             return ""
 
+        # Cap the items to prevent context bloat and timeouts
+        max_items = 15
+        truncated_list = content_list[:max_items]
+        
         # Format the content for the prompt
-        formatted_content = "\n".join([f"- {c}" for c in content_list])
+        formatted_content = "\n".join([f"- {c}" for c in truncated_list])
+        
+        # Fetch lessons
+        lessons = pattern_service.get_confirmed_lessons()
         
         # Refined prompt to avoid "financial advice" refusals
         prompt = (
             f"You are a linguistic analysis tool for MooPredict AI. Your task is to SUMMARIZE the text provided.\n"
+            f"STRICT INSTRUCTION: Adhere to the following lessons learned from past analysis:\n{lessons}\n\n"
             f"Do NOT provide financial advice, do NOT predict the market, and do NOT give recommendations.\n"
-            f"Simply extract and list the key events or topics mentioned in the following {platform} data.\n\n"
+            f"Simply extract and list the key events or topics mentioned in the following {platform} data.\n"
+            f"OUTPUT STRICTLY THE BULLET POINTS. DO NOT INCLUDE ANY PREAMBLE, INTRODUCTION, OR ACKNOWLEDGEMENTS.\n\n"
             f"DATA TO SUMMARIZE:\n{formatted_content}\n\n"
             f"SUMMARY (3-5 short bullet points, professional tone, use emojis):"
         )
@@ -32,36 +43,45 @@ class AIService:
             "prompt": prompt,
             "stream": False,
             "options": {
-                "temperature": 0.3 # Lower temperature for more factual summaries
+                "temperature": 0.3
             }
         }
 
-        try:
-            logger.info(f"[AIService] Requesting summary for {len(content_list)} items from {platform}...")
-            response = requests.post(self.base_url, json=payload, timeout=120)
-            if response.status_code == 200:
-                result = response.json()
-                summary = result.get("response", "").strip()
-                
-                # Detect if the AI refused (common in llama models)
-                refusal_keywords = ["cannot provide", "as an ai", "financial advice", "legal advice", "predict the stock", "can't assist", "can't help"]
-                if any(kw in summary.lower() for kw in refusal_keywords):
-                    logger.warning(f"[AIService] AI refused to summarize {platform} content. Using fallback.")
-                    return self._fallback_summary(content_list)
+        # Retry logic for robustness against Ollama stalls
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"[AIService] Requesting summary for {len(truncated_list)} items from {platform} (Attempt {attempt+1}/{max_retries})...")
+                response = requests.post(self.base_url, json=payload, timeout=300)
+                if response.status_code == 200:
+                    result = response.json()
+                    summary = result.get("response", "").strip()
                     
-                return summary
-            else:
-                logger.error(f"[AIService] Error from Ollama: {response.status_code} - {response.text}")
-                return self._fallback_summary(content_list)
-        except Exception as e:
-            logger.error(f"[AIService] Exception during AI request: {e}")
-            return self._fallback_summary(content_list)
+                    # Detect if the AI refused
+                    refusal_keywords = ["as an ai", "can't assist", "can't help", "i cannot fulfill"]
+                    if any(kw in summary.lower() for kw in refusal_keywords) and len(summary) < 200:
+                        logger.warning(f"[AIService] AI refused to summarize {platform} content. Using fallback.")
+                        return self._fallback_summary(content_list)
+                        
+                    return summary
+                else:
+                    logger.error(f"[AIService] Error from Ollama: {response.status_code} - {response.text}")
+            except Exception as e:
+                logger.error(f"[AIService] Attempt {attempt+1} failed: {e}")
+                if attempt == max_retries - 1:
+                    return self._fallback_summary(content_list)
+                time.sleep(2) # Small backoff before retry
 
-    def query(self, prompt: str) -> str:
+        return self._fallback_summary(content_list)
+
+    def query(self, prompt: str, symbol: Optional[str] = None) -> str:
         """Send a raw prompt to the AI and get a response."""
+        lessons = pattern_service.get_confirmed_lessons(symbol)
+        full_prompt = f"### CONTEXT & RULES:\n{lessons}\n\n### TASK:\n{prompt}"
+        
         payload = {
             "model": self.model,
-            "prompt": prompt,
+            "prompt": full_prompt,
             "stream": False,
             "options": {
                 "temperature": 0.4
@@ -69,7 +89,7 @@ class AIService:
         }
         try:
             logger.info(f"[AIService] Sending raw query...")
-            response = requests.post(self.base_url, json=payload, timeout=120)
+            response = requests.post(self.base_url, json=payload, timeout=180)
             if response.status_code == 200:
                 summary = response.json().get("response", "").strip()
                 refusal_keywords = ["cannot provide", "as an ai", "financial advice", "can't assist", "can't help"]
@@ -82,23 +102,36 @@ class AIService:
             return "⚠️ AI Exception"
 
     def query_json(self, prompt: str) -> Dict:
-        """Send a prompt to the AI and expect a JSON response."""
+        """Send a prompt to the AI and expect a JSON response with robust parsing."""
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
             "format": "json",
             "options": {
-                "temperature": 0.2
+                "temperature": 0.1 # Lower temp for better JSON structure
             }
         }
         try:
             logger.info(f"[AIService] Sending JSON query...")
+            # Increased timeout for JSON queries as they are more complex
             response = requests.post(self.base_url, json=payload, timeout=120)
             if response.status_code == 200:
                 content = response.json().get("response", "").strip()
-                return json.loads(content)
-            return {"error": "AI Service Error"}
+                try:
+                    return json.loads(content)
+                except json.JSONDecodeError:
+                    # Fallback: Try to find JSON block in text
+                    import re
+                    match = re.search(r'\{.*\}', content, re.DOTALL)
+                    if match:
+                        try:
+                            return json.loads(match.group())
+                        except:
+                            pass
+                    logger.error(f"[AIService] Failed to parse JSON from AI: {content}")
+                    return {"error": "Invalid JSON from AI"}
+            return {"error": f"AI Service Error: {response.status_code}"}
         except Exception as e:
             logger.error(f"[AIService] JSON Query Exception: {e}")
             return {"error": str(e)}
