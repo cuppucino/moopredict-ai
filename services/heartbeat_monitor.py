@@ -71,7 +71,7 @@ class HeartbeatMonitor:
         self.state["alerts"][alert_key] = time.time()
 
     def check_positions(self):
-        """Check all positions for significant moves (±3% or ±5%)."""
+        """Check all positions for significant moves (±3% or ±5%) and batch alerts."""
         logger.info("[Heartbeat] Checking positions...")
         try:
             positions = moomoo_service.get_positions()
@@ -80,6 +80,9 @@ class HeartbeatMonitor:
 
             if "positions" not in self.state:
                 self.state["positions"] = {}
+
+            alerts_to_send = []
+            max_level = "info"
 
             for pos in positions:
                 symbol = pos["symbol"]
@@ -104,9 +107,25 @@ class HeartbeatMonitor:
                     
                     if not self._is_on_cooldown(alert_key):
                         emoji = "🚀" if pnl_pct > 0 else "📉"
-                        msg = f"{emoji} *Position Alert: {symbol}*\nMove: {pnl_pct:+.2f}%\nPrice: ${current_price:.2f}\nAvg: ${avg_price:.2f}"
-                        notification_queue.enqueue(msg, level=level, category="risk")
+                        alerts_to_send.append(
+                            f"{emoji} *{symbol}*: {pnl_pct:+.2f}% (${current_price:.2f} | Avg: ${avg_price:.2f})"
+                        )
                         self._update_alert_timestamp(alert_key)
+                        # Escalate max_level if needed
+                        if level == "alert":
+                            max_level = "alert"
+                        elif level == "warning" and max_level == "info":
+                            max_level = "warning"
+
+            if alerts_to_send:
+                if len(alerts_to_send) == 1:
+                    msg = f"⚠️ *Position Alert*\n{alerts_to_send[0]}"
+                else:
+                    msg = f"🚨 *Batch Position Alert*\n───────────────────\n" + "\n".join(alerts_to_send)
+                
+                notification_queue.enqueue(msg, level=max_level, category="risk")
+                logger.info(f"[Heartbeat] Sent batched position alert for {len(alerts_to_send)} symbols.")
+
         except Exception as e:
             logger.error(f"[Heartbeat] Position check error: {e}")
 
