@@ -152,7 +152,50 @@ class Prediction(Base):
     notes = Column(Text)  # post-resolution notes / lessons
     pattern_id = Column(Integer, ForeignKey("pattern_database.id"))
     resolved_at = Column(DateTime)
+    confidence_score = Column(Float)     # 0-100
+    signal_summary = Column(JSON)        # Breakdown of all signals
+    postmortem = Column(JSON)            # Post-resolution analysis
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class TASnapshot(Base):
+    __tablename__ = "ta_snapshots"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    composite_score = Column(Float)
+    rsi = Column(Float)
+    vwap = Column(Float)
+    poc = Column(Float)
+    macd_histogram = Column(Float)
+    adx = Column(Float)
+    bollinger_pct_b = Column(Float)
+    zscore = Column(Float)
+    regime = Column(String(20))
+    raw_json = Column(JSON)  # Full indicator dump
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+class SentimentSnapshot(Base):
+    __tablename__ = "sentiment_snapshots"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    score = Column(Float)                # -1 to +1
+    label = Column(String(20))           # BULLISH | BEARISH | NEUTRAL
+    news_score = Column(Float)           # News-only component
+    social_score = Column(Float)         # Social-only component
+    analyst_score = Column(Float)        # Analyst rating component
+    data_count = Column(Integer)         # Number of data points
+    raw_json = Column(JSON)              # Full breakdown
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+class OptionsSnapshot(Base):
+    __tablename__ = "options_snapshots"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    max_pain = Column(Float)
+    total_gex = Column(Float)            # Total Gamma Exposure
+    pcr = Column(Float)                  # Put/Call Ratio
+    spot_price = Column(Float)
+    raw_json = Column(JSON)              # Full chain breakdown
+    timestamp = Column(DateTime, default=datetime.utcnow)
 
 def init_db():
     """Initialize the database tables."""

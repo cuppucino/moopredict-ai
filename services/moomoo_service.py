@@ -1,14 +1,18 @@
 import os
 import time
+import socket
+from concurrent.futures import ThreadPoolExecutor
+from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from futu import *
 from loguru import logger
 
 class MoomooService:
-    def __init__(self, host: str = "127.0.0.1", port: int = 11111):
-        self.host = host
-        self.port = port
+    def __init__(self, host: str = None, port: int = None):
+        load_dotenv()
+        self.host = host or os.getenv("MOOMOO_HOST", "127.0.0.1")
+        self.port = int(port or os.getenv("MOOMOO_PORT", 11111))
         self.trd_ctx: Optional[OpenSecTradeContext] = None
         self.quote_ctx: Optional[OpenQuoteContext] = None
         self.acc_id: Optional[int] = None
@@ -20,11 +24,47 @@ class MoomooService:
         self._bal_cache = None
         self._bal_cache_expiry = datetime.now()
 
+    def _scan_ip(self, ip: str) -> Optional[str]:
+        """Check if port is open on a given IP."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.3)
+                if s.connect_ex((ip, self.port)) == 0:
+                    return ip
+        except:
+            pass
+        return None
+
+    def discover_opend_ip(self) -> List[str]:
+        """Automatically find potential OpenD IPs on the local network."""
+        candidates = [self.host, "127.0.0.1"]
+        
+        # Add local subnet if on a common private range
+        try:
+            hostname = socket.gethostname()
+            local_ip = socket.gethostbyname(hostname)
+            if local_ip.startswith(("192.168.", "10.", "172.")):
+                prefix = ".".join(local_ip.split(".")[:-1])
+                # Scan common endings first
+                for i in [1, 90, 100, 33]: # Common static IPs
+                    candidates.append(f"{prefix}.{i}")
+                
+                # Multi-threaded fast scan of the entire /24 subnet
+                logger.info(f"[Moomoo] Auto-scanning subnet {prefix}.0/24 for OpenD...")
+                ips_to_scan = [f"{prefix}.{i}" for i in range(1, 255)]
+                with ThreadPoolExecutor(max_workers=50) as executor:
+                    results = list(executor.map(self._scan_ip, ips_to_scan))
+                    found_ips = [r for r in results if r]
+                    candidates.extend(found_ips)
+        except Exception as e:
+            logger.warning(f"[Moomoo] Subnet discovery failed: {e}")
+
+        # Unique IPs while preserving order
+        return list(dict.fromkeys(candidates))
+
     def connect(self) -> bool:
-        """Initialize connection to OpenD with dynamic IP detection."""
-        target_ips = [self.host, "127.0.0.1", "192.168.100.90", "192.168.0.33"]
-        # Remove duplicates while preserving order
-        target_ips = list(dict.fromkeys(target_ips))
+        """Initialize connection to OpenD with smart IP discovery."""
+        target_ips = self.discover_opend_ip()
         
         for ip in target_ips:
             try:
@@ -41,11 +81,12 @@ class MoomooService:
                     return True
                 else:
                     logger.warning(f"[Moomoo] Connection to {ip} failed: {data}")
-                    self.close() # Clean up failed contexts
+                    self.close()
             except Exception as e:
-                logger.warning(f"[Moomoo] Unexpected error connecting to {ip}: {e}")
+                # Don't log full exception for every IP during scan
+                pass
                 
-        logger.error("[Moomoo] Failed to connect to any target IP.")
+        logger.error("[Moomoo] Failed to connect to any target IP. Please check if OpenD is running.")
         return False
 
     def _initialize_account(self, acc_list_df):
@@ -114,6 +155,11 @@ class MoomooService:
                 }
                 self._bal_cache = result
                 self._bal_cache_expiry = datetime.now() + timedelta(minutes=5)
+                
+                # Register freshness
+                from services.data_freshness import freshness_registry
+                freshness_registry.register_update("moomoo_balance")
+                
                 return result
             else:
                 logger.error(f"Balance query failed: {data}")
@@ -143,6 +189,11 @@ class MoomooService:
                     })
                 self._pos_cache = positions
                 self._pos_cache_expiry = datetime.now() + timedelta(minutes=5)
+                
+                # Register freshness
+                from services.data_freshness import freshness_registry
+                freshness_registry.register_update("moomoo_positions")
+                
                 return positions
             else:
                 logger.error(f"Position query failed: {data}")
@@ -233,46 +284,83 @@ class MoomooService:
             return []
 
     def get_stock_quote(self, symbol: str) -> Dict:
-        """Fetch real-time quote for a symbol with market snapshot fallback."""
-        if not self.quote_ctx:
-            if not self.connect():
-                return {"success": False, "error": "Not connected"}
-
-        if "." not in symbol:
-            symbol = f"US.{symbol}"
-            
-        try:
-            # 1. Try standard quote first
-            self.quote_ctx.subscribe([symbol], [SubType.QUOTE])
-            ret, data = self.quote_ctx.get_stock_quote([symbol])
-            
-            last_price = 0.0
-            if ret == RET_OK:
-                last_price = float(data.iloc[0]['last_price'])
-            
-            # 2. Fallback to Snapshot if price is 0.0 or failed
-            if last_price <= 0.0:
-                logger.info(f"[Moomoo] Quote returned 0.0 for {symbol}. Trying market snapshot...")
-                ret, data = self.quote_ctx.get_market_snapshot([symbol])
+        """Fetch real-time quote for a symbol with market snapshot and yfinance fallback."""
+        from services.data_freshness import freshness_registry
+        
+        if self.quote_ctx:
+            if "." not in symbol:
+                symbol = f"US.{symbol}"
+                
+            try:
+                # 1. Try standard quote first
+                self.quote_ctx.subscribe([symbol], [SubType.QUOTE])
+                ret, data = self.quote_ctx.get_stock_quote([symbol])
+                
+                last_price = 0.0
                 if ret == RET_OK:
                     last_price = float(data.iloc[0]['last_price'])
-                else:
-                    # Final attempt: get_cur_kline
-                    ret, df = self.quote_ctx.get_cur_kline(symbol, 1, SubType.K_DAY)
+                
+                # 2. Fallback to Snapshot if price is 0.0 or failed
+                if last_price <= 0.0:
+                    logger.info(f"[Moomoo] Quote returned 0.0 for {symbol}. Trying market snapshot...")
+                    ret, data = self.quote_ctx.get_market_snapshot([symbol])
                     if ret == RET_OK:
-                        last_price = float(df['close'].iloc[-1])
+                        last_price = float(data.iloc[0]['last_price'])
+                    else:
+                        # Final attempt: get_cur_kline
+                        ret, df = self.quote_ctx.get_cur_kline(symbol, 1, SubType.K_DAY)
+                        if ret == RET_OK:
+                            last_price = float(df['close'].iloc[-1])
 
+                if last_price > 0:
+                    freshness_registry.register_update("moomoo_quote", symbol)
+                    return {
+                        "symbol": symbol,
+                        "last_price": last_price,
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "moomoo"
+                    }
+            except Exception as e:
+                logger.error(f"[Moomoo] Quote exception for {symbol}: {e}")
+
+        # Tier 4: yfinance fallback (delayed but better than nothing)
+        try:
+            import yfinance as yf
+            yf_symbol = symbol.split(".")[-1] if "." in symbol else symbol
+            logger.info(f"[Moomoo] Attempting yfinance fallback for {yf_symbol}...")
+            ticker = yf.Ticker(yf_symbol)
+            
+            # Try fast price lookup first
+            last_price = ticker.fast_info.get('last_price', 0.0)
+            
+            if last_price <= 0:
+                # Fallback to history
+                hist = ticker.history(period="1d")
+                if not hist.empty:
+                    last_price = float(hist['Close'].iloc[-1])
+            
             if last_price > 0:
+                freshness_registry.register_update("yfinance_fallback", symbol)
+                logger.warning(f"[Moomoo] Using yfinance fallback for {symbol}: ${last_price}")
                 return {
                     "symbol": symbol,
                     "last_price": last_price,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "yfinance"
                 }
+        except Exception as ye:
+            logger.error(f"[Moomoo] yfinance fallback failed for {symbol}: {ye}")
             
-            return {"success": False, "error": f"Failed to get price for {symbol}"}
-        except Exception as e:
-            logger.error(f"[Moomoo] Quote exception for {symbol}: {e}")
-            return {"success": False, "error": str(e)}
+        return {"success": False, "error": f"Failed to get price for {symbol} from any source"}
+
+    def auto_reconnect(self, max_attempts: int = 3):
+        """Wraps connect() with retry logic."""
+        for i in range(max_attempts):
+            logger.info(f"[Moomoo] Auto-reconnect attempt {i+1}/{max_attempts}...")
+            if self.connect():
+                return True
+            time.sleep(min(30, 5 * (2**i))) # Exponential backoff: 5, 10, 20s
+        return False
 
     def close(self):
         """Clean up connections."""

@@ -14,5 +14,13 @@ yfinance
 feedparser
 requests
 pandas
+pandas_ta
+scipy
+numpy
+vaderSentiment
+vectorbt
+torch
+xgboost
+scikit-learn
 pytest
 pytest-mock

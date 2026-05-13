@@ -11,7 +11,7 @@ from loguru import logger
 LOG_FILE = os.path.join(os.path.dirname(__file__), "logs", "combined.log")
 logger.add(LOG_FILE, rotation="500 MB", retention="10 days", level="INFO")
 
-from core.database import init_db, get_db, UserWatchlist, NewsIntel, SocialPost
+from core.database import init_db, get_db, UserWatchlist, NewsIntel, SocialPost, SessionLocal, Prediction
 from core.scheduler import scheduler
 from services.moomoo_service import moomoo_service
 from services.notifications import notification_queue
@@ -33,6 +33,8 @@ from services.outlook_service import outlook_service
 from services.validation_service import validation_service
 from services.sentiment_service import sentiment_service
 from services.pattern_stats import pattern_stats_service
+from services.volume_flow_service import vol_flow_service
+from services.heartbeat_monitor import heartbeat_monitor
 from market_movers_endpoint import get_market_movers
 
 from contextlib import asynccontextmanager
@@ -163,6 +165,85 @@ def get_technical_analysis(symbol: str):
     """Fetch full technical analysis for a stock."""
     return ta_service.get_full_analysis(symbol)
 
+@app.get("/api/ta/score/{symbol}")
+def get_ta_score(symbol: str):
+    """Fetch composite TA score (0-100)."""
+    from services.ta_engine import ta_engine
+    return ta_engine.compute_all(symbol)
+
+@app.get("/api/ta/regime/{symbol}")
+def get_market_regime(symbol: str):
+    """Fetch current market regime (TRENDING/RANGE)."""
+    from services.ta_engine import ta_engine
+    res = ta_engine.compute_all(symbol)
+    return {"symbol": symbol, "regime": res.get("regime", "UNKNOWN")}
+
+@app.get("/api/sentiment/breakdown/{symbol}")
+def get_sentiment_breakdown(symbol: str):
+    """Fetch detailed sentiment breakdown (News vs Social)."""
+    from services.sentiment_engine import sentiment_engine
+    return sentiment_engine.score_symbol(symbol)
+
+@app.get("/api/options/analysis/{symbol}")
+def get_options_analysis(symbol: str):
+    """Fetch detailed options metrics (Max Pain, GEX)."""
+    from services.options_engine import options_engine
+    return options_engine.get_chain_data(symbol)
+
+@app.get("/api/risk/var/{symbol}")
+def get_var(symbol: str, confidence: float = 0.95, days: int = 1):
+    """Value at Risk and Expected Shortfall."""
+    from services.risk_engine import risk_engine
+    return risk_engine.calculate_var(symbol, confidence, days)
+
+@app.get("/api/risk/kelly")
+def get_kelly(symbol: str = None):
+    """Kelly Criterion optimal position sizing."""
+    from services.risk_engine import risk_engine
+    return risk_engine.calculate_kelly(symbol)
+
+@app.get("/api/risk/sharpe/{symbol}")
+def get_sharpe(symbol: str):
+    """Annualized Sharpe Ratio."""
+    from services.risk_engine import risk_engine
+    return risk_engine.calculate_sharpe(symbol)
+
+@app.get("/api/risk/smartsize/{symbol}")
+def get_smart_size(symbol: str, price: float = None):
+    """Kelly + VaR hybrid position sizing."""
+    from services.risk_engine import risk_engine
+    if not price:
+        quote = moomoo_service.get_stock_quote(symbol)
+        price = quote.get("last_price", 0)
+    if price <= 0:
+        return {"error": "Could not determine price."}
+    return risk_engine.smart_position_size(symbol, price)
+
+@app.get("/api/backtest/rsi/{symbol}")
+def get_backtest_rsi(symbol: str, lookback: int = 365):
+    """Backtest RSI strategy."""
+    from services.backtest_engine import backtest_engine
+    return backtest_engine.backtest_rsi(symbol, lookback_days=lookback)
+
+
+@app.get("/api/backtest/ema/{symbol}")
+def get_backtest_ema(symbol: str, lookback: int = 365):
+    """Backtest EMA crossover strategy."""
+    from services.backtest_engine import backtest_engine
+    return backtest_engine.backtest_ema_crossover(symbol, lookback_days=lookback)
+
+@app.get("/api/ml/forecast/{symbol}")
+def get_ml_forecast(symbol: str):
+    """LSTM Price Forecast."""
+    from services.ml_engine import ml_engine
+    return ml_engine.predict_price_lstm(symbol)
+
+@app.get("/api/ml/trend/{symbol}")
+def get_ml_trend(symbol: str):
+    """Trend Prediction (Random Forest)."""
+    from services.ml_engine import ml_engine
+    return ml_engine.predict_trend_random_forest(symbol)
+
 @app.get("/api/earnings/{symbol}")
 def get_earnings(symbol: str):
     """Fetch earnings info for a stock."""
@@ -179,6 +260,11 @@ def get_watchlist_earnings(db: Session = Depends(get_db)):
 def get_sectors():
     """Fetch sector performance heatmap."""
     return sector_service.get_sector_performance()
+
+@app.get("/api/rrg")
+def get_rrg():
+    """Calculate Relative Rotation Graph (RRG) quadrants."""
+    return sector_service.calculate_rrg()
 
 @app.get("/api/sectors/{symbol}")
 def get_sector_detail(symbol: str):
@@ -225,6 +311,29 @@ def get_position_size(symbol: str, price: float, risk: float = 2.0):
     """Calculate recommended position size."""
     return risk_service.calculate_position_size(symbol, price, risk)
 
+@app.get("/api/darkpool/{symbol}")
+def get_darkpool_data(symbol: str):
+    """Fetch institutional dark pool prints."""
+    from services.darkpool_service import darkpool_service
+    return darkpool_service.get_summary(symbol)
+
+@app.get("/api/uoa/{symbol}")
+def get_uoa_flow(symbol: str):
+    """Fetch Unusual Options Activity (UOA) alerts."""
+    from services.uoa_service import uoa_service
+    return uoa_service.get_summary(symbol)
+
+@app.get("/api/sec/{symbol}")
+def get_sec_filings(symbol: str):
+    """Fetch insider trades and institutional filings."""
+    from services.sec_filing_service import sec_service
+    return sec_service.get_summary(symbol)
+
+@app.get("/api/vol/{symbol}")
+def get_volume_flow(symbol: str, res: str = "1w"):
+    """Fetch Institutional Volume Flow analysis."""
+    return vol_flow_service.calculate_volume_profile(symbol, res)
+
 def is_market_open():
     """Check if current time is within US market hours (13:30 - 21:00 UTC)."""
     now = datetime.now(pytz.utc)
@@ -251,6 +360,17 @@ def get_scheduler_status():
         "jobs": jobs,
         "current_time_utc": datetime.now(pytz.utc).isoformat()
     }
+
+@app.get("/api/heartbeat/status")
+def get_heartbeat_status():
+    """Fetch current heartbeat state and last check results."""
+    return heartbeat_monitor.state
+
+@app.post("/api/heartbeat/check")
+def trigger_heartbeat_check():
+    """Manually trigger a full heartbeat check."""
+    heartbeat_monitor.run_full_check()
+    return {"success": True, "message": "Manual heartbeat check triggered"}
 
 @app.get("/api/journal")
 def get_journal(limit: int = 20):
@@ -447,9 +567,19 @@ def place_trade(payload: dict):
 async def handle_webhook(request: Request, db: Session = Depends(get_db)):
     try:
         body = await request.json()
-        text = (body.get("text") or body.get("content") or "").strip()
+        # Support multiple common webhook field names
+        text = (
+            body.get("text") or 
+            body.get("content") or 
+            body.get("message") or 
+            body.get("msg") or 
+            body.get("data") or 
+            ""
+        ).strip()
+        
         parts = text.split()
         if not parts:
+            logger.warning(f"[Webhook] Received empty or unparseable payload: {body}")
             return {"content": "Empty command."}
         
         # Strip ! or / and normalize to lowercase
@@ -500,12 +630,45 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
 
         if command == "status":
             wl_count = db.query(UserWatchlist).count()
+            uptime = round((time.time() - startup_time) / 3600, 1)
+            from services.data_freshness import freshness_registry
+            report = freshness_registry.get_staleness_report()
+            stale = len([a for a in report.values() if a > 120])
+            
             status_text = (
-                f"✅ *Server Online (Python)*\n"
+                f"✅ *Server Online*\n"
+                f"⏱️ Uptime: {uptime} hours\n"
                 f"📋 Watchlist: {wl_count} symbols\n"
-                f"🔗 Moomoo: {'connected' if moomoo_service.is_connected else 'not connected'}"
+                f"🔗 Moomoo: {'connected' if moomoo_service.is_connected else '🔴 DISCONNECTED'}\n"
+                f"🧊 Stale Sources: {stale}"
             )
             return {"content": status_text}
+
+        if command == "freshness":
+            from services.data_freshness import freshness_registry
+            report = freshness_registry.get_staleness_report()
+            lines = [f"• {s}: {age} min" for s, age in report.items()]
+            return {"content": "🧊 *Data Freshness Report*\n──────────────\n" + ("\n".join(lines) if lines else "No data registered.")}
+
+        if command == "reconnect":
+            success = moomoo_service.auto_reconnect()
+            return {"content": "🔄 *Moomoo Reconnect*\n──────────────\nStatus: " + ("✅ SUCCESS" if success else "❌ FAILED")}
+
+        if command == "heartbeat":
+            heartbeat_monitor.run_full_check()
+            state = heartbeat_monitor.state
+            last_check = state.get("last_check_utc", "Never")
+            return {
+                "content": (
+                    f"💓 *Heartbeat Status*\n"
+                    f"──────────────────\n"
+                    f"🕒 Last Check: {last_check}\n"
+                    f"📈 Positions Tracked: {len(state.get('positions', {}))}\n"
+                    f"🌀 Sectors Tracked: {len(state.get('sectors', {}))}\n"
+                    f"🖥️ OpenD: {'✅ OK' if state.get('health', {}).get('opend_connected') else '❌ Error'}\n\n"
+                    f"🚀 Manual check triggered and finished."
+                )
+            }
 
         if command == "news":
             from services.news_scraper import news_scraper
@@ -554,7 +717,233 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
             analysis = ta_service.get_full_analysis(symbol)
             if "error" in analysis: return {"content": f"❌ Error: {analysis['error']}"}
             macd = analysis['macd']
-            return {"content": f"📉 *{symbol} MACD:* {macd['macd']:.4f} ({macd['trend']})"}
+            return {"content": f"📉 *{symbol} MACD:* {macd['macd']:.4f} ({macd['trend']})\n_Note: MACD is ranked F-Tier (Avoid)._"}
+
+        if command == "vwap" and len(parts) > 1:
+            symbol = parts[1].upper()
+            analysis = ta_service.get_full_analysis(symbol)
+            if "error" in analysis: return {"content": f"❌ Error: {analysis['error']}"}
+            vwap = analysis['vwap']
+            price = analysis['price']
+            diff = (price - vwap) / vwap * 100
+            status = "Bullish (Above VWAP)" if price > vwap else "Bearish (Below VWAP)"
+            return {"content": f"💎 *{symbol} VWAP (S-Tier)*\n──────────────────\n💵 Price: ${price:.2f}\n📊 VWAP: ${vwap:.2f}\n📈 Offset: {diff:+.2f}%\n🎯 Signal: *{status}*"}
+
+        if command == "score" and len(parts) > 1:
+            symbol = parts[1].upper()
+            from services.ta_engine import ta_engine
+            res = ta_engine.compute_all(symbol)
+            if "error" in res: return {"content": f"❌ Error: {res['error']}"}
+            
+            sig_lines = "\n".join([f"• {s['name']}: {s['signal']} ({s['strength']:+})" for s in res['signals']])
+            report = (
+                f"🎯 *TA Composite Score: {symbol}*\n"
+                f"──────────────────\n"
+                f"📈 Score: *{res['composite_score']}/100*\n"
+                f"🏷️ Label: *{res['label']}*\n"
+                f"🌐 Regime: {res['regime']}\n\n"
+                f"*Signal Breakdown:*\n{sig_lines}"
+            )
+            return {"content": report}
+
+        if command == "regime" and len(parts) > 1:
+            symbol = parts[1].upper()
+            from services.ta_engine import ta_engine
+            res = ta_engine.compute_all(symbol)
+            if "error" in res: return {"content": f"❌ Error: {res['error']}"}
+            return {"content": f"🌐 *{symbol} Market Regime:* {res['regime']}"}
+
+        if command == "sentiment" and len(parts) > 1:
+            symbol = parts[1].upper()
+            from services.sentiment_engine import sentiment_engine
+            res = sentiment_engine.score_symbol(symbol)
+            if "error" in res: return {"content": f"❌ Error: {res['error']}"}
+            
+            emoji = "🟢" if res['label'] == "BULLISH" else "🔴" if res['label'] == "BEARISH" else "🟡"
+            report = (
+                f"{emoji} *Sentiment Report: {symbol}*\n"
+                f"──────────────────\n"
+                f"📊 Score: *{res['score']}* (-1 to +1)\n"
+                f"🏷️ Label: *{res['label']}*\n"
+                f"🗞️ News count: {res.get('news_count', 0)}\n"
+                f"💬 Social count: {res.get('social_count', 0)}\n\n"
+                f"_Weighted by source reliability and time decay._"
+            )
+            return {"content": report}
+
+        if command == "options" and len(parts) > 1:
+            symbol = parts[1].upper()
+            from services.options_engine import options_engine
+            res = options_engine.get_chain_data(symbol)
+            if not res: return {"content": f"❌ Error: Could not fetch options for {symbol}"}
+            
+            report = (
+                f"🎰 *Options Flow: {symbol}*\n"
+                f"──────────────────\n"
+                f"🧠 Max Pain: *${res['max_pain']}*\n"
+                f"💥 Total GEX: *{res['total_gex']:,.0f}*\n"
+                f"⚖️ PCR (OI): *{res['pcr']}*\n"
+                f"📍 Spot: ${res['spot_price']}\n\n"
+                f"📅 Expiry: {res['expiration']}\n"
+                f"_GEX is a proxy for market maker hedging pressure._"
+            )
+            return {"content": report}
+
+        if command == "var" and len(parts) > 1:
+            symbol = parts[1].upper()
+            from services.risk_engine import risk_engine
+            res = risk_engine.calculate_var(symbol)
+            if "error" in res: return {"content": f"❌ {res['error']}"}
+            report = (
+                f"📉 *Value at Risk: {symbol}*\n"
+                f"──────────────────\n"
+                f"🎯 95% VaR: *{res['var_pct']}%*\n"
+                f"💰 VaR/Share: ${res['var_usd_per_share']}\n"
+                f"🔻 CVaR (Tail): {res['cvar_pct']}%\n"
+                f"📊 Daily Vol: {res['daily_volatility']}%\n"
+                f"📈 Annual Vol: {res['annualized_volatility']}%\n\n"
+                f"_95% of the time, your daily loss won't exceed {abs(res['var_pct'])}%._"
+            )
+            return {"content": report}
+
+        if command == "kelly":
+            symbol = parts[1].upper() if len(parts) > 1 else None
+            from services.risk_engine import risk_engine
+            res = risk_engine.calculate_kelly(symbol)
+            if "error" in res: return {"content": f"❌ {res['error']}"}
+            report = (
+                f"🎲 *Kelly Criterion: {res.get('symbol', 'PORTFOLIO')}*\n"
+                f"──────────────────\n"
+                f"📊 Win Rate: {res.get('win_rate', res.get('accuracy', 'N/A'))}%\n"
+                f"🏆 Full Kelly: {res['kelly_full_pct']}%\n"
+                f"✅ Half Kelly: *{res['kelly_half_pct']}%* (Recommended)\n"
+                f"🏷️ Edge: *{res['label']}*\n\n"
+                f"_{res.get('recommendation', '')}_"
+            )
+            return {"content": report}
+
+        if command == "sharpe" and len(parts) > 1:
+            symbol = parts[1].upper()
+            from services.risk_engine import risk_engine
+            res = risk_engine.calculate_sharpe(symbol)
+            if "error" in res: return {"content": f"❌ {res['error']}"}
+            report = (
+                f"📐 *Sharpe Ratio: {symbol}*\n"
+                f"──────────────────\n"
+                f"📊 Sharpe: *{res['sharpe_ratio']}* ({res['label']})\n"
+                f"📈 Return: {res['annualized_return']}%/yr\n"
+                f"📉 Vol: {res['annualized_volatility']}%/yr\n\n"
+                f"_Risk-free rate: {res['risk_free_rate']*100}%. > 1.0 = good, > 2.0 = excellent._"
+            )
+            return {"content": report}
+
+        if command == "smartsize" and len(parts) > 1:
+            symbol = parts[1].upper()
+            from services.risk_engine import risk_engine
+            quote = moomoo_service.get_stock_quote(symbol)
+            price = quote.get("last_price", 0)
+            if price <= 0: return {"content": f"❌ Could not get price for {symbol}."}
+            res = risk_engine.smart_position_size(symbol, price)
+            if "error" in res: return {"content": f"❌ {res['error']}"}
+            report = (
+                f"🧮 *Smart Position Size: {symbol}*\n"
+                f"──────────────────\n"
+                f"💵 Price: ${res['current_price']}\n"
+                f"🎲 Kelly Risk: {res['kelly_risk_pct']}%\n"
+                f"📉 VaR Stop: {res['var_stop_pct']}%\n"
+                f"📦 Shares: *{res['recommended_shares']}*\n"
+                f"💰 Cost: ${res['total_cost']}\n"
+                f"🛡️ Stop: ${res['stop_loss_price']}\n\n"
+                f"_Method: {res['method']}_"
+            )
+            return {"content": report}
+
+        if command == "backtest" and len(parts) > 1:
+            symbol = parts[1].upper()
+            strategy = parts[2].lower() if len(parts) > 2 else "rsi"
+            from services.backtest_engine import backtest_engine
+            
+            if strategy == "rsi":
+                res = backtest_engine.backtest_rsi(symbol)
+            elif strategy == "macd":
+                res = backtest_engine.backtest_macd(symbol)
+            elif strategy == "ema":
+                res = backtest_engine.backtest_ema_crossover(symbol)
+            else:
+                return {"content": "❌ Unknown strategy. Use: rsi, macd, ema"}
+                
+            if not res.get("success"):
+                return {"content": f"❌ Backtest failed: {res.get('error')}"}
+                
+            report = (
+                f"🧪 *Backtest Results: {symbol}*\n"
+                f"Strategy: {res['strategy']}\n"
+                f"──────────────────\n"
+                f"📈 Total Return: *{res['total_return_pct']}%*\n"
+                f"⚖️ Benchmark: {res['benchmark_return_pct']}% (Buy & Hold)\n"
+                f"🎯 Win Rate: {res['win_rate_pct']}%\n"
+                f"🔻 Max DD: {res['max_drawdown_pct']}%\n"
+                f"📐 Sharpe: {res['sharpe_ratio']}\n"
+                f"📦 Trades: {res['total_trades']}\n\n"
+                f"_Data: Past 365 days, 0.1% fees._"
+            )
+            return {"content": report}
+
+        if command == "forecast" and len(parts) > 1:
+            symbol = parts[1].upper()
+            from services.ml_engine import ml_engine
+            res = ml_engine.predict_price_lstm(symbol)
+            if "error" in res: return {"content": f"❌ ML Error: {res['error']}"}
+            
+            icon = "🚀" if res['trend'] == "BULLISH" else "📉"
+            report = (
+                f"{icon} *ML Price Forecast: {symbol}*\n"
+                f"──────────────────\n"
+                f"💵 Current: ${res['current_price']}\n"
+                f"🎯 Target (5d): *${res['predicted_price_5d']}*\n"
+                f"📈 Change: *{res['predicted_change_pct']}%*\n"
+                f"🏷️ Trend: {res['trend']}\n"
+                f"🧠 Confidence: {res['confidence']}%\n\n"
+                f"_Method: 30-day LSTM (PyTorch). 20 epochs training on-demand._"
+            )
+            return {"content": report}
+
+        if command == "trend" and len(parts) > 1:
+            symbol = parts[1].upper()
+            from services.ml_engine import ml_engine
+            res = ml_engine.predict_trend_random_forest(symbol)
+            if "error" in res: return {"content": f"❌ ML Error: {res['error']}"}
+            
+            icon = "🟢" if res['trend'] == "BULLISH" else "🔴"
+            report = (
+                f"{icon} *ML Trend Analysis: {symbol}*\n"
+                f"──────────────────\n"
+                f"📈 Up Prob: *{res['up_probability']}%*\n"
+                f"🏷️ Verdict: *{res['trend']}*\n"
+                f"🧠 Confidence: {res['confidence']}%\n\n"
+                f"_Features: RSI, SMA20/50, Volume Flow. Engine: Random Forest._"
+            )
+            return {"content": report}
+
+        if command == "rrg":
+            data = sector_service.calculate_rrg()
+            if not data: return {"content": "❌ Error calculating RRG."}
+            
+            # Group by quadrant
+            quads = {"LEADING": [], "IMPROVING": [], "WEAKENING": [], "LAGGING": []}
+            for s in data:
+                quads[s['quadrant']].append(s['symbol'])
+            
+            report = (
+                f"🌀 *Sector Rotation (RRG)*\n"
+                f"──────────────────\n"
+                f"🚀 *Leading*: {', '.join(quads['LEADING']) if quads['LEADING'] else 'None'}\n"
+                f"📈 *Improving*: {', '.join(quads['IMPROVING']) if quads['IMPROVING'] else 'None'}\n"
+                f"📉 *Weakening*: {', '.join(quads['WEAKENING']) if quads['WEAKENING'] else 'None'}\n"
+                f"🐢 *Lagging*: {', '.join(quads['LAGGING']) if quads['LAGGING'] else 'None'}\n\n"
+                f"_Benchmark: SPY (14-day Rolling RS)_"
+            )
+            return {"content": report}
 
         if command == "earnings" and len(parts) > 1:
             symbol = parts[1].upper()
@@ -634,6 +1023,39 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
             if "error" in data: return {"content": f"❌ Error: {data['error']}"}
             return {"content": f"🎲 *{symbol} Put/Call Ratio:* {data['pcr']} ({data['sentiment']})"}
 
+        if command == "darkpool" and len(parts) > 1:
+            symbol = parts[1].upper()
+            from services.darkpool_service import darkpool_service
+            res = darkpool_service.get_summary(symbol)
+            if res.get("status") == "NOT_CONFIGURED":
+                return {"content": f"🐳 *Institutional Dark Pool: {symbol}*\n──────────────────\n{res['message']}"}
+            return {"content": f"🐳 *Dark Pool Levels: {symbol}*\n" + "\n".join([f"• ${l['price']}: {l['volume']} shares" for l in res.get('levels', [])])}
+
+        if command == "uoa" and len(parts) > 1:
+            symbol = parts[1].upper()
+            from services.uoa_service import uoa_service
+            res = uoa_service.get_summary(symbol)
+            if res.get("status") == "NOT_CONFIGURED":
+                return {"content": f"🐙 *Options Flow (UOA): {symbol}*\n──────────────────\n{res['message']}"}
+            return {"content": f"🐙 *UOA Risk: {symbol}*\n• Squeeze Risk: {res['squeeze_risk']}\n• Sweeps: {res['sweep_count']}\n• OTM Calls: {res['otm_call_count']}"}
+
+        if command in ["sec", "insider"] and len(parts) > 1:
+            symbol = parts[1].upper()
+            from services.sec_filing_service import sec_service
+            res = sec_service.get_summary(symbol)
+            if res.get("status") == "NOT_CONFIGURED":
+                return {"content": f"🏛️ *SEC Insider Tracking: {symbol}*\n──────────────────\n{res['message']}"}
+            
+            icon = "🟢" if "BULLISH" in res['insider_sentiment'] else "🔴" if "BEARISH" in res['insider_sentiment'] else "⚪"
+            return {"content": f"🏛️ *Insider Activity: {symbol}*\n{icon} Sentiment: *{res['insider_sentiment']}*\n💰 Buys: {res['buy_count']}\n📉 Sells: {res['sell_count']}"}
+
+        if command == "vol" and len(parts) > 1:
+            symbol = parts[1].upper()
+            res = parts[2].lower() if len(parts) > 2 else "1w"
+            if res not in ["1d", "1w", "1m"]: res = "1w"
+            report = vol_flow_service.get_signal_report(symbol, res)
+            return {"content": report}
+
         if command == "risk":
             params = risk_service.get_current_risk_params()
             if "error" in params: return {"content": f"❌ Error: {params['error']}"}
@@ -701,15 +1123,10 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 order_type = "LIMIT" if price > 0 else "MARKET"
                 
                 # 🔴 Rule: Check earnings before ANY trade (Buy or Sell)
-                earnings = earnings_service.get_stock_earnings(symbol)
-                if earnings.get("earnings_dates"):
-                    try:
-                        next_date = datetime.strptime(earnings["earnings_dates"][0], "%Y-%m-%d")
-                        days_to_earnings = (next_date - datetime.now()).days
-                        if days_to_earnings <= 3 and days_to_earnings >= 0:
-                            return {"content": f"⚠️ *EARNINGS BLOCK*\n{symbol} has earnings in {days_to_earnings} days.\nRule: HOLD through earnings catalyst."}
-                    except Exception as e:
-                        logger.error(f"[Trade] Earnings date parse error: {e}")
+                from services.validation_service import validation_service
+                is_blocked, message = validation_service.is_earnings_blocked(symbol)
+                if is_blocked and "force" not in [p.lower() for p in parts]:
+                    return {"content": f"🛡️ *EARNINGS BLOCK*\n{message}"}
 
                 # 🔴 Rule: Risk Management Check (for Buy only)
                 if side == "BUY":
@@ -953,6 +1370,12 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 # Check for 'force' at the end of the command
                 force = "force" in [p.lower() for p in parts]
                 
+                # 🔴 Rule: Check earnings before prediction
+                from services.validation_service import validation_service
+                is_blocked, message = validation_service.is_earnings_blocked(symbol)
+                if is_blocked and not force:
+                    return {"content": f"⚠️ *PREDICTION BLOCKED*\n{message}\nTo override, use `!predict {symbol} ... force`."}
+                
                 # Check for pattern_id (e.g. pid:5)
                 pattern_id = None
                 for p in parts:
@@ -972,8 +1395,21 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                     force=force
                 )
                 if res["success"]:
+                    from services.signal_aggregator import signal_aggregator
+                    consensus = signal_aggregator.get_consensus(symbol)
+                    conf = consensus.get("confidence_score", 50)
+                    label = consensus.get("label", "NEUTRAL")
+                    
                     warn_text = "\n\n⚠️ *Warnings:*\n" + "\n".join(res["warnings"]) if res.get("warnings") else ""
-                    return {"content": f"🔮 *Prediction #{res['prediction_id']} Recorded*\n{symbol} {direction} @ ${res['entry_price']:.2f}\nConfidence: {confidence}%\nCatalyst: {catalyst}{warn_text}"}
+                    return {
+                        "content": (
+                            f"🔮 *Prediction #{res['prediction_id']} Recorded*\n"
+                            f"──────────────────\n"
+                            f"{symbol} *{direction}* @ ${res['entry_price']:.2f}\n"
+                            f"🧠 Consensus: *{label}* ({conf}%)\n"
+                            f"📣 Catalyst: {catalyst}{warn_text}"
+                        )
+                    }
                 
                 if res.get("can_override"):
                     warn_text = "\n".join(res["warnings"])
@@ -1008,15 +1444,52 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
         if command == "predscore":
             stats = prediction_service.get_stats()
             cats = "\n".join([f"• {k}: {v}%" for k, v in stats.get('by_category', {}).items()])
+            
+            # Add win/loss streaks
+            streak = stats.get('current_streak', 0)
+            streak_text = f"🔥 Streak: {streak} WINS" if streak > 0 else f"❄️ Streak: {abs(streak)} LOSSES" if streak < 0 else ""
+            
             return {
                 "content": (
                     f"🎯 *Prediction Scorecard*\n"
                     f"──────────────────\n"
                     f"📈 Total Resolved: {stats['total_resolved']}\n"
-                    f"🎯 Win Rate: {stats['accuracy_pct']}%\n\n"
-                    f"*By Category:*\n{cats}"
+                    f"🎯 Win Rate: {stats['accuracy_pct']}%\n"
+                    f"{streak_text}\n\n"
+                    f"*By Category:*\n{cats}\n\n"
+                    f"_Tip: Use !postmortem <id> to see why a specific call failed._"
                 )
             }
+
+        if command == "postmortem" and len(parts) > 1:
+            try:
+                pid = int(parts[1])
+                db = SessionLocal()
+                prediction = db.query(Prediction).filter(Prediction.id == pid).first()
+                if not prediction or not prediction.postmortem:
+                    return {"content": f"❌ No post-mortem found for Prediction #{pid}."}
+                
+                pm = prediction.postmortem
+                correct = ", ".join(pm.get("correct_signals", [])) or "None"
+                incorrect = ", ".join(pm.get("incorrect_signals", [])) or "None"
+                fail = pm.get("primary_failure", "N/A")
+                
+                status_icon = "✅" if prediction.outcome == "RIGHT" else "❌"
+                report = (
+                    f"{status_icon} *Post-Mortem: Prediction #{pid} ({prediction.symbol})*\n"
+                    f"──────────────────\n"
+                    f"🏷️ Outcome: *{prediction.outcome}* ({prediction.actual_move_pct:.2f}%)\n"
+                    f"🧊 Data Quality: {pm.get('data_quality', 'N/A')}\n\n"
+                    f"🎯 *What Worked:*\n{correct}\n\n"
+                    f"🚩 *What Lied:*\n{incorrect}\n\n"
+                    f"💥 *Primary Failure:* {fail}\n\n"
+                    f"_Post-mortem auto-generated upon resolution._"
+                )
+                return {"content": report}
+            except Exception as e:
+                return {"content": f"⚠️ Error: {str(e)}"}
+            finally:
+                db.close()
 
         if command == "help":
             return {
@@ -1039,6 +1512,8 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                     f"• !sell SYMBOL QTY [PRICE] — place order\n"
                     f"• !checkstatus — positions & balance\n"
                     f"• !ta SYMBOL — full technical analysis\n"
+                    f"• !vwap SYMBOL — S-tier trend check\n"
+                    f"• !vol SYMBOL [1d|1w|1m] — volume flow\n"
                     f"• !tradelog [stats] — view history\n"
                     f"• !strategy — view evolution stats\n"
                     f"• !watchlist — show watchlist\n"

@@ -8,8 +8,24 @@ from services.sector_analysis import sector_service
 from services.ai_service import ai_service
 from services.notifications import notification_queue
 from services.technical_analysis import ta_service
+from services.earnings_calendar import earnings_service
+from core.database import SessionLocal, NewsIntel, SocialPost, UserWatchlist
 
 class DailyBriefingService:
+    def _get_earnings_catalysts(self, db) -> List[str]:
+        """Fetch earnings alerts for watchlist symbols."""
+        symbols = db.query(UserWatchlist).all()
+        lines = []
+        for s in symbols:
+            earnings = earnings_service.get_stock_earnings(s.symbol)
+            if earnings.get("success") and earnings.get("earnings_dates"):
+                next_date_str = earnings["earnings_dates"][0]
+                next_date = datetime.strptime(next_date_str, "%Y-%m-%d")
+                days_to = (next_date - datetime.now()).days
+                if 0 <= days_to <= 3:
+                    lines.append(f"⚠️ {s.symbol} earnings in {days_to} days ({next_date_str}) — BLOCKED")
+        return lines
+
     def generate_morning_briefing(self):
         """10:00 AM MYT - Overnight recap and market setup."""
         logger.info("[Briefing] Generating Morning Briefing...")
@@ -27,8 +43,12 @@ class DailyBriefingService:
             sectors = sector_service.get_sector_performance()[:3] # Top 3
             sector_lines = [f"- {s['name']}: {s['change_1d']}%" for s in sectors]
             
-            # 4. Use AI to synthesize
-            context = f"NEWS:\n" + "\n".join(news_lines) + "\n\nSOCIAL:\n" + "\n".join(social_lines) + "\n\nSECTORS:\n" + "\n".join(sector_lines)
+            # 4. Get earnings catalysts
+            earnings_lines = self._get_earnings_catalysts(db)
+            earnings_str = "\n".join(earnings_lines) if earnings_lines else "None"
+
+            # 5. Use AI to synthesize
+            context = f"NEWS:\n" + "\n".join(news_lines) + "\n\nSOCIAL:\n" + "\n".join(social_lines) + "\n\nSECTORS:\n" + "\n".join(sector_lines) + "\n\nEARNINGS:\n" + earnings_str
             
             prompt = (
                 "You are MooPredict AI. Provide a 'Morning Briefing' (10:00 AM MYT).\n"
@@ -56,20 +76,29 @@ class DailyBriefingService:
     def generate_premarket_prep(self):
         """04:00 PM MYT - Technical review and upcoming earnings."""
         logger.info("[Briefing] Generating Pre-Market Prep...")
-        # Get positions
-        positions = moomoo_service.get_positions()
-        pos_lines = []
-        for p in positions:
-            ta = ta_service.get_full_analysis(p['symbol'])
-            pos_lines.append(f"• {p['symbol']}: RSI {ta.get('rsi', 'N/A')} | {ta.get('summary', 'NEUTRAL')}")
+        db = SessionLocal()
+        try:
+            # Get positions
+            positions = moomoo_service.get_positions()
+            pos_lines = []
+            for p in positions:
+                ta = ta_service.get_full_analysis(p['symbol'])
+                pos_lines.append(f"• {p['symbol']}: RSI {ta.get('rsi', 'N/A')} | {ta.get('summary', 'NEUTRAL')}")
             
-        message = (
-            f"☕ *PRE-MARKET PREP*\n"
-            f"───────────────────────────\n"
-            f"*Current Positions:* \n" + "\n".join(pos_lines) + "\n\n"
-            f"📈 Watch for volatility at 9:30 PM open."
-        )
-        notification_queue.enqueue(message, category="news")
+            # Get earnings alerts
+            earnings_lines = self._get_earnings_catalysts(db)
+            earnings_str = "*Earnings Catalyst Alerts:*\n" + "\n".join(earnings_lines) if earnings_lines else ""
+            
+            message = (
+                f"☕ *PRE-MARKET PREP*\n"
+                f"───────────────────────────\n"
+                f"*Current Positions:* \n" + "\n".join(pos_lines) + "\n\n"
+                f"{earnings_str}\n"
+                f"📈 Watch for volatility at 9:30 PM open."
+            )
+            notification_queue.enqueue(message, category="news")
+        finally:
+            db.close()
 
     def generate_eod_summary(self):
         """04:00 AM MYT - End of day performance recap."""

@@ -43,24 +43,42 @@ class PredictionService:
                     logger.info(f"[Prediction] Safety check WARNINGS for {symbol}: {v_res['warnings']}")
                     # We still proceed but include warnings in the result
             
+            # --- Signal Aggregation ---
+            from services.signal_aggregator import signal_aggregator
+            consensus = signal_aggregator.get_consensus(symbol)
+            auto_conf = consensus.get("confidence_score", 50)
+            
+            # 🛡️ Rule: Minimum 40% Confidence Threshold
+            if not force and auto_conf < 40:
+                logger.warning(f"[Prediction] Low confidence REJECT for {symbol}: {auto_conf}% (Min: 40%)")
+                return {
+                    "success": False,
+                    "error": f"Confidence score too low: {auto_conf}% (Minimum 40% required)",
+                    "can_override": True
+                }
+
             # Fetch current price for entry
             price_data = moomoo_service.get_stock_quote(symbol)
             entry_price = price_data.get("last_price", 0.0)
             
-            deadline = datetime.utcnow() + timedelta(days=timeframe_days)
+            from services.data_freshness import freshness_registry
+            freshness_snapshot = freshness_registry.stamp_prediction_context(symbol)
             
             prediction = Prediction(
                 symbol=symbol,
                 direction=direction,
-                confidence=confidence,
+                confidence=confidence, # User's manual confidence
+                confidence_score=auto_conf, # Engine's calculated confidence
+                signal_summary=consensus, # Full signal breakdown
                 catalyst=catalyst,
                 category=category,
                 timeframe_days=timeframe_days,
                 entry_price=entry_price,
                 target_price=target_price,
                 pattern_id=pattern_id,
-                deadline=deadline,
-                created_at=datetime.utcnow()
+                deadline=datetime.utcnow() + timedelta(days=timeframe_days),
+                created_at=datetime.utcnow(),
+                notes=f"Freshness: {freshness_snapshot}" # Storing freshness in notes for now
             )
             
             db.add(prediction)
@@ -146,6 +164,13 @@ class PredictionService:
             prediction.actual_move_pct = move_pct
             prediction.resolved_at = datetime.utcnow()
             prediction.notes = manual_notes
+            
+            # --- Auto Post-Mortem ---
+            try:
+                from services.prediction_postmortem import postmortem_service
+                prediction.postmortem = postmortem_service.analyze(prediction)
+            except Exception as pe:
+                logger.error(f"[Prediction] Postmortem failed: {pe}")
             
             db.commit()
             logger.info(f"[Prediction] Resolved #{prediction.id} as {outcome} ({move_pct:.2f}%)")
