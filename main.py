@@ -73,6 +73,28 @@ app.add_middleware(
 def health_check():
     return {"ok": True, "uptime": time.time() - startup_time if 'startup_time' in globals() else 0}
 
+@app.get("/api/v1/commands/freshness")
+def get_v1_freshness():
+    from services.data_freshness import freshness_registry
+    return freshness_registry.get_staleness_report()
+
+@app.get("/api/v1/commands/status")
+def get_v1_status(db: Session = Depends(get_db)):
+    wl_count = db.query(UserWatchlist).count()
+    uptime_sec = time.time() - startup_time if 'startup_time' in globals() else 0
+    from services.data_freshness import freshness_registry
+    report = freshness_registry.get_staleness_report()
+    stale_count = len([a for a in report.values() if a > 120])
+    
+    return {
+        "is_online": True,
+        "uptime_hours": round(uptime_sec / 3600, 1),
+        "watchlist_count": wl_count,
+        "moomoo_connected": moomoo_service.is_connected,
+        "stale_sources_count": stale_count,
+        "timestamp_utc": datetime.utcnow().isoformat()
+    }
+
 @app.get("/api/notifications/pending")
 def get_pending_notifications():
     return notification_queue.get_pending()
