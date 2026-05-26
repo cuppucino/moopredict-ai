@@ -11,7 +11,7 @@ from loguru import logger
 LOG_FILE = os.path.join(os.path.dirname(__file__), "logs", "combined.log")
 logger.add(LOG_FILE, rotation="500 MB", retention="10 days", level="INFO")
 
-from core.database import init_db, get_db, UserWatchlist, NewsIntel, SocialPost, SessionLocal, Prediction
+from core.database import init_db, get_db, UserWatchlist, NewsIntel, SocialPost, SessionLocal, Prediction, MCPTResult
 from core.scheduler import scheduler
 from services.moomoo_service import moomoo_service
 from services.notifications import notification_queue
@@ -35,6 +35,7 @@ from services.sentiment_service import sentiment_service
 from services.pattern_stats import pattern_stats_service
 from services.volume_flow_service import vol_flow_service
 from services.heartbeat_monitor import heartbeat_monitor
+from services.paper_trading import paper_trading_service
 from market_movers_endpoint import get_market_movers
 
 from contextlib import asynccontextmanager
@@ -94,6 +95,55 @@ def get_v1_status(db: Session = Depends(get_db)):
         "stale_sources_count": stale_count,
         "timestamp_utc": datetime.utcnow().isoformat()
     }
+
+@app.get("/api/v1/mcpt/strategies")
+def get_mcpt_strategies(db: Session = Depends(get_db)):
+    """
+    Exposes the latest strategy status, statistical p-values, EMA, and
+    warmup bootstrapping status for the frontend dashboard.
+    """
+    try:
+        from sqlalchemy import func
+        # Subquery to get the max run_at for each strategy/ticker pair
+        subq = db.query(
+            MCPTResult.strategy,
+            MCPTResult.ticker,
+            func.max(MCPTResult.run_at).label("max_run_at")
+        ).group_by(MCPTResult.strategy, MCPTResult.ticker).subquery()
+        
+        # Join back to extract full latest record
+        latest_results = db.query(MCPTResult).join(
+            subq,
+            (MCPTResult.strategy == subq.c.strategy) &
+            (MCPTResult.ticker == subq.c.ticker) &
+            (MCPTResult.run_at == subq.c.max_run_at)
+        ).all()
+        
+        response_data = []
+        for r in latest_results:
+            # Dynamically count total runs to determine bootstrap progress
+            total_runs = db.query(MCPTResult).filter(
+                MCPTResult.strategy == r.strategy,
+                MCPTResult.ticker == r.ticker
+            ).count()
+            
+            response_data.append({
+                "id": r.id,
+                "strategy": r.strategy,
+                "ticker": r.ticker,
+                "run_at": r.run_at.isoformat() if r.run_at else None,
+                "insample_p": r.insample_p,
+                "wf_p": r.wf_p,
+                "ema_p": r.ema_p,
+                "real_pf": r.real_pf,
+                "status": r.status,
+                "bootstrap_pending": total_runs < 5,
+                "total_runs": total_runs
+            })
+        return response_data
+    except Exception as error:
+        logger.error(f"Error fetching MCPT strategies: {error}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(error)}")
 
 @app.get("/api/notifications/pending")
 def get_pending_notifications():
@@ -1545,6 +1595,64 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                     f"• !status — server health"
                 )
             }
+
+        if command == "paper":
+            portfolio = paper_trading_service.get_portfolio()
+            balance = paper_trading_service.get_performance()
+            cash = f"${balance.get('current_balance', 0):.2f}"
+            if not portfolio:
+                return {"content": f"📄 *Paper Portfolio*\n──────────────────\n💵 Balance: {cash}\nNo open positions."}
+            lines = [f"• {p['symbol']}: {p['quantity']} shares @ ${p['entry_price']:.2f} | P&L: {p.get('pnl_pct', 0):+.2f}%" for p in portfolio]
+            return {"content": f"📄 *Paper Portfolio*\n──────────────────\n💵 Balance: {cash}\n\n" + "\n".join(lines)}
+
+        if command == "paperbuy" and len(parts) >= 3:
+            symbol = parts[1].upper()
+            try:
+                qty = float(parts[2])
+                price = float(parts[3]) if len(parts) > 3 else None
+                if not price:
+                    quote = moomoo_service.get_stock_quote(symbol)
+                    price = quote.get("last_price", 0)
+                if not price:
+                    return {"content": f"❌ Could not fetch price for {symbol}."}
+                res = paper_trading_service.open_trade(symbol, "BUY", qty, price)
+                if res.get("success"):
+                    return {"content": f"📄 *Paper BUY*\n✅ {qty} {symbol} @ ${price:.2f}\n🛡️ Stop: ${res.get('stop_loss', 0):.2f}\n_No real money used._"}
+                return {"content": f"❌ {res.get('error', 'Trade failed')}"}
+            except ValueError:
+                return {"content": "⚠️ Usage: `!paperbuy SYMBOL QTY [PRICE]`"}
+
+        if command == "papersell" and len(parts) >= 3:
+            symbol = parts[1].upper()
+            try:
+                qty = float(parts[2])
+                price = float(parts[3]) if len(parts) > 3 else None
+                if not price:
+                    quote = moomoo_service.get_stock_quote(symbol)
+                    price = quote.get("last_price", 0)
+                portfolio = paper_trading_service.get_portfolio()
+                trade = next((p for p in portfolio if p['symbol'] == symbol), None)
+                if not trade:
+                    return {"content": f"❌ No open paper position for {symbol}."}
+                res = paper_trading_service.close_trade(trade['id'], price, reason="manual_sell")
+                if res.get("success"):
+                    return {"content": f"📄 *Paper SELL*\n✅ {symbol} closed @ ${price:.2f}\n📈 P&L: {res.get('pnl_pct', 0):+.2f}% (${res.get('pnl_usd', 0):+.2f})\n_No real money used._"}
+                return {"content": f"❌ {res.get('error', 'Close failed')}"}
+            except ValueError:
+                return {"content": "⚠️ Usage: `!papersell SYMBOL QTY [PRICE]`"}
+
+        if command == "paperstats":
+            perf = paper_trading_service.get_performance()
+            return {"content": (
+                f"📊 *Paper Trading Stats*\n"
+                f"──────────────────\n"
+                f"💰 Balance: ${perf.get('current_balance', 0):.2f}\n"
+                f"📈 Total P&L: ${perf.get('total_pnl_usd', 0):+.2f} ({perf.get('total_pnl_pct', 0):+.2f}%)\n"
+                f"🎯 Win Rate: {perf.get('win_rate', 0):.0f}%\n"
+                f"🔢 Total Trades: {perf.get('trade_count', 0)}\n"
+                f"📂 Open: {perf.get('open_count', 0)}\n\n"
+                f"_Simulated trades only. No real money._"
+            )}
 
         return {"content": "Unknown command. Try !help"}
 

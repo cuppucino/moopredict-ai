@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, Boolean, JSON, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, Boolean, JSON, ForeignKey, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, session
 from dotenv import load_dotenv
@@ -81,6 +81,7 @@ class PatternDB(Base):
     lesson = Column(Text)
     times_seen = Column(Integer, default=1)
     last_seen = Column(DateTime, default=datetime.utcnow)
+    source = Column(String(50)) # 'auto_lesson', 'manual', 'transcript'
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class SocialPost(Base):
@@ -131,6 +132,7 @@ class TrailingStop(Base):
     stop_price = Column(Float, nullable=False)
     trade_id = Column(Integer, ForeignKey("trade_journal.id"))
     status = Column(String(20), default="ACTIVE") # ACTIVE | TRIGGERED | CANCELLED
+    is_day_trade = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     triggered_at = Column(DateTime)
 
@@ -155,6 +157,30 @@ class Prediction(Base):
     confidence_score = Column(Float)     # 0-100
     signal_summary = Column(JSON)        # Breakdown of all signals
     postmortem = Column(JSON)            # Post-resolution analysis
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class PaperTrade(Base):
+    __tablename__ = "paper_trades"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), nullable=False)
+    side = Column(String(10))         # BUY | SHORT
+    quantity = Column(Float)
+    entry_price = Column(Float)
+    exit_price = Column(Float)
+    stop_loss = Column(Float)         # Mandatory
+    take_profit = Column(Float)
+    status = Column(String(20), default="OPEN")       # OPEN | CLOSED | STOPPED_OUT
+    outcome = Column(String(20))      # WIN | LOSS | BREAKEVEN
+    pnl_amount = Column(Float)
+    pnl_percent = Column(Float)
+    strategy = Column(String(30))     # Which signal triggered this
+    window_type = Column(String(20), default="SWING")  # DAY_TRADE | SWING | SCALP
+    reasoning = Column(Text)           # GLM's full reasoning
+    catalyst = Column(Text)            # Short catalyst summary
+    decision_id = Column(Integer)      # FK to decision_log.id
+    news_context = Column(Text)        # News snapshot at entry
+    opened_at = Column(DateTime, default=datetime.utcnow)
+    closed_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class TASnapshot(Base):
@@ -196,6 +222,66 @@ class OptionsSnapshot(Base):
     spot_price = Column(Float)
     raw_json = Column(JSON)              # Full chain breakdown
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+class TradingKnowledge(Base):
+    __tablename__ = "trading_knowledge"
+    id = Column(Integer, primary_key=True, index=True)
+    rule = Column(Text, nullable=False)
+    category = Column(String(20))       # ENTRY, EXIT, RISK, TIMING, CATALYST
+    importance = Column(Integer)         # 1-10
+    source = Column(String(50))          # 'transcript', 'manual', 'lesson'
+    active = Column(Boolean, default=True)
+    times_applied = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class DecisionLog(Base):
+    __tablename__ = "decision_log"
+    id = Column(Integer, primary_key=True, index=True)
+    action = Column(String(10))          # OPEN, CLOSE, HOLD, SKIP
+    symbol = Column(String(20))
+    side = Column(String(5))             # BUY, SHORT, null
+    confidence = Column(Integer)
+    catalyst = Column(Text)
+    reasoning = Column(Text)
+    position_size_pct = Column(Integer)
+    news_context = Column(Text)
+    market_state = Column(Text)
+    error = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class DailyPerformance(Base):
+    __tablename__ = "daily_performance"
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(Date, unique=True)
+    trades_won = Column(Integer, default=0)
+    trades_lost = Column(Integer, default=0)
+    trades_open = Column(Integer, default=0)
+    session_pnl = Column(Float, default=0)
+    cumulative_pnl = Column(Float, default=0)
+    capital_end = Column(Float)
+    win_rate = Column(Float)
+    decisions_made = Column(Integer, default=0)
+    lessons_written = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class SystemState(Base):
+    __tablename__ = "system_state"
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String(50), unique=True, nullable=False)
+    value = Column(Text)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+class MCPTResult(Base):
+    __tablename__ = "mcpt_results"
+    id = Column(Integer, primary_key=True, index=True)
+    strategy = Column(String(50), index=True)
+    ticker = Column(String(20), index=True)
+    run_at = Column(DateTime, default=datetime.utcnow)
+    insample_p = Column(Float)
+    wf_p = Column(Float)
+    ema_p = Column(Float)
+    real_pf = Column(Float)
+    status = Column(String(20)) # 'LIVE', 'WATCHLIST', 'DISABLED'
 
 def init_db():
     """Initialize the database tables."""

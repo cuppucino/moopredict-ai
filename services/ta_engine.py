@@ -73,15 +73,29 @@ class TAEngine:
             vwap_strength = 25 if current_price > vwap_val else -25
             signals.append(TASignal("VWAP", vwap_val, vwap_signal, vwap_strength, f"Price {'above' if current_price > vwap_val else 'below'} VWAP (${vwap_val:.2f})"))
 
-            # 3b. Institutional Volume Flow (POC) - S-Tier
+            # 3b. Institutional Volume Flow (Volume Profile) - S-Tier
             try:
                 from services.volume_flow_service import vol_flow_service
                 vol_data = vol_flow_service.calculate_volume_profile(symbol, resolution="1w")
                 if vol_data.get("success"):
                     poc_val = vol_data["poc"]
                     dist = vol_data["distance_to_poc_pct"]
-                    vol_strength = 15 if dist < 2.0 else 0
-                    signals.append(TASignal("Volume Flow", poc_val, vol_data["signal"], vol_strength, f"POC at ${poc_val:.2f} ({dist}% dist)"))
+                    shape = vol_data["shape"]
+                    divergence = vol_data["divergence"]
+                    
+                    vol_strength = 0
+                    if dist < 1.0: 
+                        vol_strength = 20
+                    elif vol_data["in_value_area"]:
+                        vol_strength = 10
+                        
+                    if "P-shape" in shape: vol_strength += 5
+                    elif "b-shape" in shape: vol_strength -= 5
+                    
+                    if "BULLISH DIVERGENCE" in divergence: vol_strength += 10
+                    elif "BEARISH DIVERGENCE" in divergence: vol_strength -= 10
+
+                    signals.append(TASignal("Volume Flow", poc_val, "BULLISH" if current_price > poc_val else "BEARISH", vol_strength, f"POC: ${poc_val:.2f} | Shape: {shape.split(' ')[0]} | {divergence.split(' ')[0]}"))
             except Exception as ve:
                 logger.warning(f"[TAEngine] Volume flow integration error: {ve}")
 
@@ -180,17 +194,28 @@ class TAEngine:
             db.close()
 
     def get_full_analysis(self, symbol: str) -> Dict:
-        """Compatibility wrapper for legacy technical_analysis.py."""
+        """Compatibility wrapper for legacy technical_analysis.py with enhanced day trading metrics."""
         res = self.compute_all(symbol)
         if "error" in res:
             return res
             
+        # Fetch volume and gap data (Phase 1B)
+        volume_data = moomoo_service.get_volume(symbol)
+        
         # Format back to the old structure
         rsi_val = next((s['value'] for s in res['signals'] if s['name'] == 'RSI'), 50)
         ma_info = next((s for s in res['signals'] if s['name'] == 'SMA'), {})
         macd_info = next((s for s in res['signals'] if s['name'] == 'MACD'), {})
         vwap_info = next((s for s in res['signals'] if s['name'] == 'VWAP'), {})
         
+        # Calculate gap if possible
+        gap_pct = 0.0
+        if volume_data.get("success"):
+            prev_close = volume_data.get("previous_close", 0)
+            open_price = volume_data.get("open_price", 0)
+            if prev_close > 0:
+                gap_pct = (open_price - prev_close) / prev_close * 100
+
         return {
             "symbol": symbol,
             "price": res["price"],
@@ -199,6 +224,13 @@ class TAEngine:
             "composite_score": res["composite_score"],
             "summary": res["label"],
             "regime": res["regime"],
+            "volume_info": {
+                "ratio": volume_data.get("volume_ratio", 1.0),
+                "signal": volume_data.get("volume_signal", "NORMAL"),
+                "high": volume_data.get("intraday_high", 0),
+                "low": volume_data.get("intraday_low", 0)
+            },
+            "gap_pct": round(gap_pct, 2),
             "moving_averages": {
                 "sma200": ma_info.get("value", 0), # Simplified for compat
                 "position": ma_info.get("signal", "UNKNOWN")

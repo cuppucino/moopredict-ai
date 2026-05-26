@@ -5,6 +5,7 @@ from services.sentiment_engine import sentiment_engine
 from services.options_engine import options_engine
 from services.volume_flow_service import vol_flow_service
 from services.sector_analysis import sector_service
+from services.political_monitor import political_monitor
 
 class SignalAggregator:
     def get_consensus(self, symbol: str) -> Dict:
@@ -55,6 +56,15 @@ class SignalAggregator:
             except Exception as e:
                 logger.warning(f"[SignalAggregator] Sentiment error for {symbol}: {e}")
 
+            # 4b. Political Sentiment (VIP Twitter/X)
+            political_val = 0
+            try:
+                pol_data = political_monitor.get_recent_political_sentiment()
+                if pol_data.get("post_count", 0) > 0:
+                    political_val = pol_data["score"]  # Already -50..+50
+            except Exception as e:
+                logger.warning(f"[SignalAggregator] Political sentiment error for {symbol}: {e}")
+
             # 5. Volume Flow Score Derivation
             vol_val = 0
             if vol_flow and vol_flow.get("success"):
@@ -66,8 +76,8 @@ class SignalAggregator:
                 vol_val = (v_score - 5) * 10 
 
             # 6. Final Calculation (Weighted Average)
-            # New Weights: TA (0.25), Sentiment (0.15), Options (0.15), Vol (0.10), Sector (0.10), Insider (0.15), News (0.10)
-            total_norm = (ta_val * 0.25) + (sent_val * 0.15) + (opt_score * 0.15) + (vol_val * 0.10) + (sector_influence * 0.10) + (insider_score * 0.15)
+            # Weights: TA (0.22), Sentiment (0.13), Options (0.13), Vol (0.10), Sector (0.10), Insider (0.12), Political (0.10), News (0.10)
+            total_norm = (ta_val * 0.22) + (sent_val * 0.13) + (opt_score * 0.13) + (vol_val * 0.10) + (sector_influence * 0.10) + (insider_score * 0.12) + (political_val * 0.10)
             
             # Freshness Penalty: degrade confidence if data is stale
             from services.data_freshness import freshness_registry
@@ -91,7 +101,8 @@ class SignalAggregator:
                     "sentiment": sentiment,
                     "options": options,
                     "volume": vol_flow,
-                    "sector_influence": sector_influence
+                    "sector_influence": sector_influence,
+                    "political": political_val
                 }
             }
             

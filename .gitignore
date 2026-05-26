@@ -50,5 +50,6 @@ env/
 *.tar.gz
 *.zip
 *.csv
+*.parquet
 moomoo_OpenD_*/
 .claude/

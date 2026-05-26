@@ -136,6 +136,46 @@ class AIService:
             logger.error(f"[AIService] JSON Query Exception: {e}")
             return {"error": str(e)}
 
+    def query_decision(self, prompt: str, timeout: int = 600) -> Dict:
+        """Send a complex decision prompt to glm-5.1:cloud. Returns parsed JSON."""
+        payload = {
+            "model": "glm-5.1:cloud",
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0.2}
+        }
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"[AIService] Sending decision query to glm-5.1:cloud (Attempt {attempt+1}/{max_retries})...")
+                response = requests.post(self.base_url, json=payload, timeout=timeout)
+                if response.status_code == 200:
+                    content = response.json().get("response", "").strip()
+                    try:
+                        return json.loads(content)
+                    except json.JSONDecodeError:
+                        import re
+                        match = re.search(r'\{.*\}', content, re.DOTALL)
+                        if match:
+                            try:
+                                return json.loads(match.group())
+                            except:
+                                pass
+                        logger.error(f"[AIService] Failed to parse JSON from decision: {content}")
+                        return {"error": "Invalid JSON from AI"}
+                else:
+                    logger.error(f"[AIService] Decision Error: {response.status_code} - {response.text}")
+            except Exception as e:
+                logger.error(f"[AIService] Decision Attempt {attempt+1} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+        return {"error": "Decision query failed after retries"}
+
+    def query_lesson(self, prompt: str) -> Dict:
+        """Call glm-5.1:cloud for trade lesson analysis."""
+        return self.query_decision(prompt, timeout=300)
+
     def _fallback_summary(self, content_list: list) -> str:
         """
         Return a simple list if AI fails.

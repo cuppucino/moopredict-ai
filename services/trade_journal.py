@@ -19,9 +19,22 @@ class TradeJournalService:
             logger.error(f"[Journal] File logging error: {e}")
 
     def log_trade(self, symbol: str, side: str, qty: float, price: float, order_type: str = "MARKET", thesis: str = "", stop: float = None, target: float = None) -> int:
-        """Create a new trade journal entry."""
+        """Create a new trade journal entry with mandatory stop loss."""
         db = SessionLocal()
         try:
+            # Mandatory Stop Loss Enforcement
+            if stop is None:
+                from services.risk_engine import risk_engine
+                # Use VaR-based stop or default pct
+                risk_data = risk_engine.smart_position_size(symbol, price)
+                if "error" not in risk_data:
+                    stop = risk_data["stop_loss_price"]
+                    logger.info(f"[Journal] Auto-calculated VaR stop for {symbol}: {stop}")
+                else:
+                    # Fallback to default 8%
+                    stop = price * 0.92 if side == "BUY" else price * 1.08
+                    logger.info(f"[Journal] Fallback 8% stop for {symbol}: {stop}")
+
             trade = TradeJournal(
                 symbol=symbol,
                 side=side,
@@ -37,7 +50,7 @@ class TradeJournalService:
             db.add(trade)
             db.commit()
             db.refresh(trade)
-            logger.info(f"[Journal] Logged trade #{trade.id}: {side} {qty} {symbol} @ {price}")
+            logger.info(f"[Journal] Logged trade #{trade.id}: {side} {qty} {symbol} @ {price} (Stop: {stop})")
             
             # Backup to trades.md
             log_line = f"| {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} | {trade.id} | {symbol} | {side} | {qty} | {price} | OPEN | - | {thesis} |"

@@ -1,0 +1,327 @@
+================================================================================
+MOOPREDICT AI — FULL AUTONOMY UPGRADE PLAN
+Generated: 2026-05-20
+================================================================================
+
+GOAL
+----
+Make MooPredict AI fully autonomous during US market hours (9:30 PM – 4:00 AM
+Malaysian time / 13:30 – 20:00 UTC) with no human input required. The AI must
+gather technical signals, size positions correctly, protect trades automatically,
+and allow manual override from Telegram.
+
+================================================================================
+PHASE 1 — CRITICAL: Wire TA Context into Decision Engine
+================================================================================
+
+FILE: services/decision_engine.py
+
+PROBLEM:
+  The AI currently decides using only news headlines and Twitter posts. It has
+  zero awareness of price action, VWAP position, momentum, or technical signals.
+  All the TA services (ta_engine, vwap_service, signal_aggregator,
+  reversal_detector) exist and work — they just aren't called during a cycle.
+
+CHANGE: Add _gather_ta_context() method to DecisionEngine
+
+  def _gather_ta_context(self, portfolio: list) -> dict:
+      """Gather TA signals for all open positions + any high-volume watchlist symbols."""
+      ta_data = {}
+      symbols_to_check = list({p["symbol"] for p in portfolio})
+
+      for symbol in symbols_to_check[:5]:   # cap at 5 to keep prompt size sane
+          try:
+              vwap = vwap_service.calculate(symbol)
+              reversal = reversal_detector.detect(symbol)
+              ta_data[symbol] = {
+                  "vwap_signal": vwap.get("signal"),          # BULLISH / BEARISH
+                  "vwap_distance_pct": vwap.get("distance_pct"),
+                  "reversal_patterns": reversal.get("patterns", []),
+                  "reversal_confidence": reversal.get("confidence", 0),
+              }
+          except Exception as e:
+              logger.warning(f"[DecisionEngine] TA fetch failed for {symbol}: {e}")
+      return ta_data
+
+CHANGE: Call it inside _gather_context() and add to returned dict
+
+  ta_context = self._gather_ta_context(portfolio)
+  return {
+      ...existing fields...,
+      "ta": ta_context,
+  }
+
+CHANGE: Add TA section to _build_prompt()
+
+  TECHNICAL ANALYSIS (per open position):
+  {json.dumps(context.get('ta', {}), indent=2)}
+
+IMPORTS TO ADD at top of decision_engine.py:
+  from services.vwap_service import vwap_service
+  from services.reversal_detector import reversal_detector
+
+--------------------------------------------------------------------------------
+
+================================================================================
+PHASE 2 — CRITICAL: Create Trailing Stop After Every OPEN Trade
+================================================================================
+
+FILE: services/decision_engine.py — _execute_open() method
+
+PROBLEM:
+  When a trade is opened, trailing_stop_service is never called.
+  The only protection is the static stop_loss price stored on the PaperTrade
+  record. The trailing stop service (which ratchets up on gains) is fully
+  implemented but never activated for new positions.
+
+CHANGE: After a successful paper_trading_service.open_trade(), call:
+
+  if res.get("success"):
+      try:
+          from services.trailing_stop_service import trailing_stop_service
+          trailing_stop_service.create_trailing_stop(
+              trade_id=res["trade_id"],
+              symbol=symbol,
+              side=side,
+              entry_price=price,
+          )
+      except Exception as e:
+          logger.warning(f"[DecisionEngine] Trailing stop setup failed: {e}")
+
+NOTE: trailing_stop_service already runs on a 5-minute scheduler job. Once the
+stop is created in the DB, it will be monitored automatically. No other changes
+needed to the scheduler.
+
+--------------------------------------------------------------------------------
+
+================================================================================
+PHASE 3 — IMPORTANT: Fix Position Sizing (Account for Open Capital)
+================================================================================
+
+FILE: services/decision_engine.py — _execute_open() method
+
+PROBLEM:
+  capital_to_use = context["balance"] * (size_pct / 100.0)
+
+  This uses total balance regardless of how much is already in open trades.
+  With 2 positions open at 30% each, only 40% of capital is free — but the
+  engine could still try to deploy another 30%, over-committing by 20%.
+
+CHANGE: Calculate free capital before sizing
+
+  # Sum up value deployed in open positions
+  deployed = sum(
+      p["entry"] * p["quantity"] for p in context.get("portfolio", [])
+  )
+  free_capital = context["balance"] - deployed
+  capital_to_use = free_capital * (size_pct / 100.0)
+
+  if capital_to_use < 10:   # minimum threshold
+      decision["error"] = "Insufficient free capital"
+      decision["action"] = "SKIP"
+      self._log_decision(decision)
+      return
+
+--------------------------------------------------------------------------------
+
+================================================================================
+PHASE 4 — IMPORTANT: Fix VWAP Reclaim Detection
+================================================================================
+
+FILE: services/vwap_service.py — calculate() method, lines 39–43
+
+PROBLEM:
+  The reclaim detection block has a comment and a `pass` — the variable
+  `reclaim` is never set to True. Reversal detector depends on this signal.
+
+CHANGE: Replace the stub with actual logic
+
+  reclaim = False
+  if len(df) >= 2:
+      prev_close = float(df['close'].iloc[-2])
+      curr_close = float(df['close'].iloc[-1])
+      # Per-candle VWAP proxy: use cumulative VWAP up to that candle
+      df['cum_pv'] = df['pv'].cumsum()
+      df['cum_vol'] = df['volume'].cumsum()
+      df['candle_vwap'] = df['cum_pv'] / df['cum_vol']
+      prev_vwap = float(df['candle_vwap'].iloc[-2])
+      curr_vwap = float(df['candle_vwap'].iloc[-1])
+      reclaim = (prev_close < prev_vwap) and (curr_close > curr_vwap)
+
+CHANGE: Add reclaim to the return dict
+
+  return {
+      ...existing fields...,
+      "reclaim": reclaim,
+  }
+
+--------------------------------------------------------------------------------
+
+================================================================================
+PHASE 5 — IMPORTANT: Add Open Position P&L to Decision Prompt
+================================================================================
+
+FILE: services/decision_engine.py — _gather_context()
+
+PROBLEM:
+  The portfolio list shows entry prices and quantities but the AI doesn't see
+  which positions are profitable vs underwater. This matters for CLOSE decisions
+  — the AI might OPEN a 4th trade when it should instead be cutting a loser.
+
+CHANGE: Enrich portfolio entries in get_portfolio() result with unrealized P&L
+
+  The portfolio dict already has pnl_pct from paper_trading_service.get_portfolio().
+  The fix is to make the prompt explicitly surface it:
+
+  In _build_prompt(), replace the CURRENT PORTFOLIO section with:
+
+  CURRENT PORTFOLIO (includes unrealized P&L):
+  {json.dumps([
+      {k: v for k, v in p.items() if k in
+       ['id','symbol','side','quantity','entry','current','pnl_pct','stop_loss','take_profit']}
+      for p in context.get('portfolio', [])
+  ], indent=2)}
+
+  No code changes needed — pnl_pct is already in the dict. This is a prompt
+  formatting improvement so the AI actually reads it.
+
+--------------------------------------------------------------------------------
+
+================================================================================
+PHASE 6 — IMPORTANT: Add !pause and !resume Telegram Commands
+================================================================================
+
+FILE: main.py — /webhook endpoint (the section that routes !commands)
+
+PROBLEM:
+  trading_loop.pause() and trading_loop.resume() are implemented but there is
+  no Telegram command that calls them. To pause the bot mid-session you would
+  need to SSH in.
+
+CHANGE: Add to the webhook command router
+
+  elif cmd == "!pause":
+      trading_loop.pause()
+      reply = "⏸ Autonomous trading PAUSED. Send !resume to re-enable."
+
+  elif cmd == "!resume":
+      trading_loop.resume()
+      reply = "▶️ Autonomous trading RESUMED."
+
+  elif cmd == "!status":
+      paused = trading_loop.is_paused()
+      in_hours = trading_loop.is_market_hours()
+      perf = paper_trading_service.get_performance()
+      portfolio = paper_trading_service.get_portfolio()
+      reply = (
+          f"🤖 *MooPredict Status*\n"
+          f"Trading: {'⏸ PAUSED' if paused else '✅ ACTIVE'}\n"
+          f"Market: {'🟢 OPEN' if in_hours else '🔴 CLOSED'}\n"
+          f"Balance: ${perf['current_balance']:.2f}\n"
+          f"Open positions: {len(portfolio)}/3\n"
+          f"Win rate: {perf['win_rate']:.1f}% ({perf['trade_count']} trades)"
+      )
+
+IMPORTS TO ADD in main.py (if not already present):
+  from services.trading_loop import trading_loop
+
+--------------------------------------------------------------------------------
+
+================================================================================
+PHASE 7 — RELIABILITY: Add Error Handling to Post-Market Analysis
+================================================================================
+
+FILE: services/trading_loop.py — run_postmarket_analysis()
+
+PROBLEM:
+  No try/except. If lesson_writer.write_session_lessons() throws an exception
+  the entire job crashes with no Telegram alert.
+
+CHANGE:
+
+  def run_postmarket_analysis(self):
+      logger.info("[TradingLoop] Running post-market analysis...")
+      try:
+          from services.lesson_writer import lesson_writer
+          today = datetime.utcnow().date()
+          lesson_writer.write_session_lessons(today)
+      except Exception as e:
+          logger.error(f"[TradingLoop] Post-market analysis failed: {e}")
+          from services.notifications import notification_queue
+          notification_queue.enqueue(
+              f"⚠️ Post-market analysis failed: {e}",
+              level="warning",
+              category="general"
+          )
+
+--------------------------------------------------------------------------------
+
+================================================================================
+PHASE 8 — RELIABILITY: Moomoo Connection Check Before Trade Cycles
+================================================================================
+
+FILE: services/trading_loop.py — run()
+
+PROBLEM:
+  If Moomoo quote API is unreachable, the decision cycle still runs. The engine
+  will get price=0 for any stock lookup and skip the trade (safe), but you get
+  no notification that data feeds are broken.
+
+CHANGE: Add connection validation before calling decision_engine
+
+  def run(self):
+      if not self.is_market_hours():
+          logger.info("[TradingLoop] Outside market hours. Skipping cycle.")
+          return
+
+      if self.is_paused():
+          logger.info("[TradingLoop] Autonomous trading is PAUSED. Skipping cycle.")
+          return
+
+      # Validate data feed before making decisions
+      from services.moomoo_service import moomoo_service
+      if not moomoo_service.is_connected:
+          logger.warning("[TradingLoop] Moomoo not connected. Attempting reconnect...")
+          if not moomoo_service.connect():
+              from services.notifications import notification_queue
+              notification_queue.enqueue(
+                  "⚠️ *Trade cycle skipped* — Moomoo connection failed.",
+                  level="warning",
+                  category="general"
+              )
+              return
+
+      decision_engine.run_decision_cycle()
+
+--------------------------------------------------------------------------------
+
+================================================================================
+IMPLEMENTATION ORDER
+================================================================================
+
+Do these in order. Each phase is independent but phases 1-3 have the most
+impact on actual trade quality.
+
+  Phase 1 — TA context in prompt         (HIGH impact, medium effort)
+  Phase 2 — Trailing stop on open        (HIGH impact, small effort)
+  Phase 3 — Position sizing fix          (MEDIUM impact, small effort)
+  Phase 4 — VWAP reclaim fix             (LOW impact, small effort)
+  Phase 5 — P&L in prompt                (MEDIUM impact, tiny effort)
+  Phase 6 — !pause/!resume/!status       (MEDIUM impact, small effort)
+  Phase 7 — Post-market error handling   (LOW impact, tiny effort)
+  Phase 8 — Moomoo connection check      (LOW impact, tiny effort)
+
+After all phases: pm2 restart moopredict
+
+================================================================================
+FILES TOUCHED
+================================================================================
+
+  services/decision_engine.py   — Phases 1, 2, 3, 5
+  services/vwap_service.py      — Phase 4
+  services/trading_loop.py      — Phases 7, 8
+  main.py                       — Phase 6
+
+================================================================================
+END OF PLAN
+================================================================================

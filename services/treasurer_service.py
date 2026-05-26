@@ -12,7 +12,7 @@ class TreasurerService:
         self.pending_approvals: Dict[str, Dict] = {}
         self.token_expiry_seconds = 600 # 10 minutes
 
-    def request_approval(self, symbol: str, side: str, qty: float, price: float) -> Dict:
+    def request_approval(self, symbol: str, side: str, qty: float, price: float, is_day_trade: bool = False) -> Dict:
         """Evaluate if a trade needs treasurer approval."""
         total_cost = qty * price
         
@@ -39,6 +39,7 @@ class TreasurerService:
             "qty": qty,
             "price": price,
             "total": total_cost,
+            "is_day_trade": is_day_trade,
             "expires_at": time.time() + self.token_expiry_seconds
         }
         

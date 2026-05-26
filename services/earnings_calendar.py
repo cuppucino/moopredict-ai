@@ -49,11 +49,12 @@ class EarningsCalendarService:
                 if hist is not None and not hist.empty:
                     # Take last 4 quarters
                     for idx, row in hist.head(4).iterrows():
+                        # Robustly extract fields that may be missing in some yfinance versions/tickers
                         res["history"].append({
                             "period": str(idx),
-                            "eps_actual": float(row['EPS Actual']) if pd.notnull(row['EPS Actual']) else None,
-                            "eps_estimate": float(row['EPS Estimate']) if pd.notnull(row['EPS Estimate']) else None,
-                            "surprise_pct": float(row['Surprise(%)']) if pd.notnull(row['Surprise(%)']) else None
+                            "eps_actual": float(row.get('EPS Actual')) if 'EPS Actual' in row and pd.notnull(row['EPS Actual']) else None,
+                            "eps_estimate": float(row.get('EPS Estimate')) if 'EPS Estimate' in row and pd.notnull(row['EPS Estimate']) else None,
+                            "surprise_pct": float(row.get('Surprise(%)')) if 'Surprise(%)' in row and pd.notnull(row['Surprise(%)']) else None
                         })
             except Exception as e:
                 logger.debug(f"History not available for {symbol}: {e}")

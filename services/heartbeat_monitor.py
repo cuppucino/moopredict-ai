@@ -280,14 +280,36 @@ class HeartbeatMonitor:
             if not moomoo_service.auto_reconnect():
                 self._send_dead_heartbeat_alert("OpenD is DOWN and auto-reconnect failed. Monitoring is impaired.")
         
-        # 2. Monitoring Tasks
-        self.check_system_health()
-        self.check_data_freshness()
-        self.check_balance()
-        self.check_positions()
-        self.check_earnings_proximity()
-        self.check_sector_rotation()
-        self.check_predictions()
+        # 2. Monitoring Tasks (Run with timeout to prevent blocking)
+        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+        
+        tasks = [
+            ("Health", self.check_system_health),
+            ("Freshness", self.check_data_freshness),
+            ("Balance", self.check_balance),
+            ("Positions", self.check_positions),
+            ("Earnings", self.check_earnings_proximity),
+            ("Sectors", self.check_sector_rotation),
+            ("Predictions", self.check_predictions)
+        ]
+        
+        executor = ThreadPoolExecutor(max_workers=3)
+        try:
+            future_to_task = {executor.submit(task_func): task_name for task_name, task_func in tasks}
+            try:
+                for future in as_completed(future_to_task, timeout=90): 
+                    task_name = future_to_task[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error(f"[Heartbeat] Task '{task_name}' failed: {e}")
+            except TimeoutError:
+                logger.error("[Heartbeat] Monitoring cycle timed out after 90s.")
+        except Exception as e:
+            logger.error(f"[Heartbeat] Executor error: {e}")
+        finally:
+            # wait=False is CRITICAL: it prevents the main thread from hanging if a sub-thread is stuck
+            executor.shutdown(wait=False)
         
         # 3. State Persistence
         self.state["last_check_utc"] = datetime.utcnow().isoformat()
@@ -326,7 +348,7 @@ class HeartbeatMonitor:
         logger.info("[Heartbeat] Generating pre-market scan...")
         try:
             # We can use briefing_service or generate a specific heartbeat scan
-            msg = "☕ *PRE-MARKET SCAN*\n───────────────────────────\nCheck !briefing for today's catalysts."
+            msg = "☕ *PRE-MARKET SCAN*\n───────────────────────────\nPre-market scan moved to autonomous trading loop."
             notification_queue.enqueue(msg, level="info", category="news")
         except Exception as e:
             logger.error(f"[Heartbeat] Pre-market scan error: {e}")

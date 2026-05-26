@@ -43,7 +43,8 @@ class XScraper:
                 for instance in NITTER_INSTANCES:
                     try:
                         url = f"{instance}/{account}/rss"
-                        response = requests.get(url, headers=headers, timeout=10)
+                        # Reduced timeout from 10s to 5s to prevent long hangs
+                        response = requests.get(url, headers=headers, timeout=5)
                         parsed = feedparser.parse(response.text)
                         
                         if parsed.get("bozo", 0) and not parsed.entries:
