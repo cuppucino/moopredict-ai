@@ -13,6 +13,7 @@ from services.mcpt.adapters.reversal_adapter import reversal_signal
 from services.mcpt.adapters.volume_profile_adapter import volume_profile_signal
 from services.mcpt.adapters.signal_aggregator_adapter import signal_aggregator_signal
 from services.mcpt.walkforward import walkforward_aggregator_signal, compute_net_returns, compute_pf_from_returns
+from services.mcpt.costs import PER_FLIP_BPS
 
 def count_signal_flips(signal: pd.Series) -> int:
     return int((signal.diff().fillna(0) != 0).sum())
@@ -178,8 +179,8 @@ def _run_single_perm_wf(
             consensus_threshold=consensus_threshold
         )
         
-        # 3. Deduct transaction costs (5 bps per flip)
-        net_rets = compute_net_returns(perm_sig, perm_df['r'], bps_cost=0.0005)
+        # 3. Deduct transaction costs (10 bps per flip)
+        net_rets = compute_net_returns(perm_sig, perm_df['r'], bps_cost=PER_FLIP_BPS)
         
         # 4. Compute PF and flips on OOS portion
         oos_net_rets = net_rets.iloc[train_lookback:]
@@ -220,8 +221,8 @@ def run_walkforward_mcpt(
             consensus_threshold=consensus_threshold
         )
         
-        # Deduct transaction costs (5 bps per flip)
-        real_net_rets = compute_net_returns(real_sig, ohlc['r'], bps_cost=0.0005)
+        # Deduct transaction costs (10 bps per flip)
+        real_net_rets = compute_net_returns(real_sig, ohlc['r'], bps_cost=PER_FLIP_BPS)
         real_pf = compute_pf_from_returns(real_net_rets.iloc[train_lookback:])
         n_trades = count_signal_flips(real_sig.iloc[train_lookback:])
         

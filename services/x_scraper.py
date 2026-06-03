@@ -5,16 +5,31 @@ from core.database import SessionLocal, SocialPost
 from services.notifications import notification_queue
 
 ACCOUNTS = [
-    "elonmusk", 
-    "realDonaldTrump", 
-    "federalreserve", 
-    "GaryGensler", 
-    "SECGov",
+    # S-tier — macro / market-moving on their own
+    "realDonaldTrump",
+    "jeromehpowell",
+    "SecScottBessent",
+
+    # A-tier — ticker-specific market movers
+    "elonmusk",
+    "JensenHuang",
+    "sundarpichai",
+    "sama",            # Sam Altman
     "tim_cook",
-    "PGelsinger",
     "lisasu",
+    "zuck",
+
+    # B-tier — notable but rarely solo-movers
+    "JDVance",
+    "BillAckman",
+    "michaeljburry",
     "CathieDWood",
+    "davidtepper",
+    "elerianm",
+    "jimcramer",
     "saylor",
+    "federalreserve",
+    "SECGov",
     "VitalikButerin"
 ]
 

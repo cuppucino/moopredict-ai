@@ -89,4 +89,36 @@ class NewsScraper:
         finally:
             db.close()
 
+    def get_recent_for_ticker(self, ticker: str, hours: int = 24) -> list:
+        """
+        Return news articles mentioning the ticker or company name in the last `hours`.
+        """
+        db = SessionLocal()
+        try:
+            from datetime import timedelta
+            time_threshold = datetime.utcnow() - timedelta(hours=hours)
+            articles = db.query(NewsIntel).filter(
+                NewsIntel.scraped_at >= time_threshold
+            ).all()
+            
+            from services.political_monitor import matches_ticker, _get_sentiment
+            
+            results = []
+            for art in articles:
+                text_to_search = f"{art.headline} {art.summary or ''}"
+                if matches_ticker(text_to_search, ticker):
+                    sentiment = _get_sentiment(text_to_search)
+                    results.append({
+                        "source": art.source,
+                        "timestamp": art.scraped_at.isoformat(),
+                        "headline": art.headline,
+                        "sentiment": sentiment
+                    })
+            return results
+        except Exception as e:
+            logger.error(f"[NewsScraper] Error in get_recent_for_ticker: {e}")
+            return []
+        finally:
+            db.close()
+
 news_scraper = NewsScraper()

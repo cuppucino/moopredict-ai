@@ -11,8 +11,9 @@ from services.mcpt.adapters.rsi_adapter import rsi_signal
 from services.mcpt.adapters.vwap_adapter import vwap_mean_reversion_signal
 from services.mcpt.adapters.reversal_adapter import reversal_signal
 from services.mcpt.adapters.volume_profile_adapter import volume_profile_signal
+from services.mcpt.costs import PER_FLIP_BPS
 
-def compute_net_returns(signal: pd.Series, returns: pd.Series, bps_cost: float = 0.0005) -> pd.Series:
+def compute_net_returns(signal: pd.Series, returns: pd.Series, bps_cost: float = PER_FLIP_BPS) -> pd.Series:
     """
     Deducts transaction costs (bps_cost) per signal flip from strategy returns.
     Assumes returns is the log return series. Deducting bps_cost represents
@@ -20,11 +21,11 @@ def compute_net_returns(signal: pd.Series, returns: pd.Series, bps_cost: float =
     """
     try:
         strategy_rets = signal * returns
-        # Detect signal changes (flips)
-        flips = signal.diff().fillna(0) != 0
+        # Detect signal changes (flips) and scale costs by magnitude
+        flip_magnitude = signal.diff().fillna(0).abs()
         net_rets = strategy_rets.copy()
         # Deduct cost on flips
-        net_rets[flips] -= bps_cost
+        net_rets -= flip_magnitude * bps_cost
         return net_rets
     except Exception as error:
         logger.error(f"Error computing net returns: {error}")

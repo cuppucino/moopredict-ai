@@ -35,14 +35,22 @@ class MoomooService:
             pass
         return None
 
+    def _get_local_ip(self) -> str:
+        """Get the local IP address of this machine."""
+        try:
+            hostname = socket.gethostname()
+            return socket.gethostbyname(hostname)
+        except Exception as e:
+            logger.warning(f"[Moomoo] Failed to get local IP: {e}")
+            return "127.0.0.1"
+
     def discover_opend_ip(self) -> List[str]:
         """Automatically find potential OpenD IPs on the local network."""
         candidates = [self.host, "127.0.0.1"]
         
         # Add local subnet if on a common private range
         try:
-            hostname = socket.gethostname()
-            local_ip = socket.gethostbyname(hostname)
+            local_ip = self._get_local_ip()
             if local_ip.startswith(("192.168.", "10.", "172.")):
                 prefix = ".".join(local_ip.split(".")[:-1])
                 # Scan common endings first
@@ -109,12 +117,34 @@ class MoomooService:
                 return
 
             self.acc_id = target['acc_id']
-            # Map market string to Enum if necessary, default to HK
-            market_str = target.get('trd_market_auth', 'HK')
-            if 'US' in market_str:
-                self.trd_market = TrdMarket.US
+            # Map market string to Enum, checking environment variable first
+            env_market = os.getenv("MOOMOO_MARKET")
+            if env_market:
+                env_market_upper = env_market.upper()
+                if env_market_upper == "US":
+                    self.trd_market = TrdMarket.US
+                elif env_market_upper == "HK":
+                    self.trd_market = TrdMarket.HK
+                else:
+                    self.trd_market = TrdMarket.HK
             else:
-                self.trd_market = TrdMarket.HK
+                # Fallback to the account's authorized markets.
+                # The Futu API returns the column as 'trdmarket_auth'.
+                market_auth = target.get('trdmarket_auth')
+                if market_auth is None:
+                    market_auth = target.get('trd_market_auth', 'HK')
+                
+                # Check if US is in the authorized markets
+                if isinstance(market_auth, list):
+                    if 'US' in market_auth:
+                        self.trd_market = TrdMarket.US
+                    else:
+                        self.trd_market = TrdMarket.HK
+                else:
+                    if 'US' in str(market_auth):
+                        self.trd_market = TrdMarket.US
+                    else:
+                        self.trd_market = TrdMarket.HK
                 
             logger.info(f"Account Initialized: ID={self.acc_id}, Env={self.trd_env}, Market={self.trd_market}")
         except Exception as e:
@@ -207,6 +237,23 @@ class MoomooService:
         if not self.trd_ctx or not self.acc_id:
             return {"success": False, "error": "Not connected to Moomoo"}
 
+        # Gate on SystemState.real_trading_unlocked
+        from core.database import SessionLocal, SystemState
+        db = SessionLocal()
+        try:
+            state = db.query(SystemState).filter(SystemState.key == "real_trading_unlocked").first()
+            if not state or not state.real_trading_unlocked:
+                logger.warning(
+                    f"[Moomoo] REAL TRADE BLOCKED for {symbol}: "
+                    f"real_trading_unlocked=False (paper-trading mode)"
+                )
+                return {"success": False, "error": "real_trading_locked"}
+        except Exception as e:
+            logger.error(f"[Moomoo] Error checking real_trading_unlocked gate: {e}")
+            return {"success": False, "error": "real_trading_locked"}
+        finally:
+            db.close()
+
         try:
             # Map side to TrdSide enum
             trd_side = TrdSide.BUY if side.upper() == "BUY" else TrdSide.SELL
@@ -264,17 +311,26 @@ class MoomooService:
             if ret == RET_OK:
                 orders = []
                 for _, row in data.iterrows():
-                    # Map to a clean dictionary
-                    orders.append({
-                        "order_id": str(row['order_id']),
-                        "symbol": row['code'],
-                        "side": "BUY" if row['trd_side'] == 'BUY' else "SELL",
-                        "qty": float(row['qty']),
-                        "price": float(row['dealt_avg_price'] or row['price']),
-                        "status": row['order_status'],
-                        "time": row['create_time'],
-                        "order_type": row['order_type']
-                    })
+                    try:
+                        # Map to a clean dictionary with extended fields
+                        orders.append({
+                            "order_id": str(row['order_id']),
+                            "symbol": row['code'],
+                            "side": "BUY" if row['trd_side'] == 'BUY' else "SELL",
+                            "qty": float(row['qty']),
+                            "price": float(row['dealt_avg_price'] or row['price']),  # DEPRECATED: Use order_price or dealt_avg_price
+                            "status": row['order_status'],
+                            "time": row['create_time'],
+                            "order_type": row['order_type'],
+                            "order_price": float(row['price']),          # intended price
+                            "dealt_avg_price": float(row['dealt_avg_price']),  # actual fill
+                            "dealt_qty": float(row['dealt_qty']),
+                            "create_time": row['create_time'],           # order placed
+                            "updated_time": row['updated_time'],         # filled / final state
+                            "order_type_raw": str(row['order_type'])
+                        })
+                    except Exception as parse_error:
+                        logger.error(f"[Moomoo] Error parsing trade history row: {parse_error}")
                 return orders
             else:
                 logger.error(f"[Moomoo] History query failed: {data}")
@@ -352,6 +408,91 @@ class MoomooService:
             logger.error(f"[Moomoo] yfinance fallback failed for {symbol}: {ye}")
             
         return {"success": False, "error": f"Failed to get price for {symbol} from any source"}
+
+    def get_volume(self, symbol: str) -> Dict:
+        """Fetch volume, gap, and snapshot data for a symbol with yfinance fallback."""
+        if not symbol:
+            return {"success": False, "error": "Empty symbol"}
+
+        if "." not in symbol:
+            symbol = f"US.{symbol}"
+
+        # 1. Try Moomoo OpenD first
+        if self.quote_ctx:
+            try:
+                self.quote_ctx.subscribe([symbol], [SubType.QUOTE])
+                ret, data = self.quote_ctx.get_market_snapshot([symbol])
+                if ret == RET_OK and not data.empty:
+                    info = data.iloc[0]
+                    prev_close = float(info.get('prev_close_price', 0.0))
+                    open_price = float(info.get('open_price', 0.0))
+                    volume_ratio = float(info.get('volume_ratio', 1.0))
+                    intraday_high = float(info.get('high_price', 0.0))
+                    intraday_low = float(info.get('low_price', 0.0))
+                    
+                    # Determine volume signal based on ratio
+                    volume_signal = "NORMAL"
+                    if volume_ratio > 2.0:
+                        volume_signal = "HIGH"
+                    elif volume_ratio < 0.5:
+                        volume_signal = "LOW"
+                        
+                    return {
+                        "success": True,
+                        "previous_close": prev_close,
+                        "open_price": open_price,
+                        "volume_ratio": volume_ratio,
+                        "volume_signal": volume_signal,
+                        "intraday_high": intraday_high,
+                        "intraday_low": intraday_low,
+                        "source": "moomoo"
+                    }
+            except Exception as e:
+                logger.error(f"[Moomoo] Error fetching volume snapshot for {symbol}: {e}")
+
+        # 2. Fallback to yfinance if not connected or snapshot failed
+        try:
+            import yfinance as yf
+            yf_symbol = symbol.split(".")[-1] if "." in symbol else symbol
+            logger.info(f"[Moomoo] get_volume yfinance fallback for {yf_symbol}...")
+            ticker = yf.Ticker(yf_symbol)
+            
+            # Fetch 1d history to get open, high, low, prev close
+            hist = ticker.history(period="1d")
+            if not hist.empty:
+                info = hist.iloc[-1]
+                open_price = float(info.get('Open', 0.0))
+                intraday_high = float(info.get('High', 0.0))
+                intraday_low = float(info.get('Low', 0.0))
+                
+                # Fetch fast info or fallback for previous close
+                prev_close = float(ticker.fast_info.get('previousClose', open_price))
+                if prev_close <= 0:
+                    prev_close = open_price
+                
+                return {
+                    "success": True,
+                    "previous_close": prev_close,
+                    "open_price": open_price,
+                    "volume_ratio": 1.0,
+                    "volume_signal": "NORMAL",
+                    "intraday_high": intraday_high,
+                    "intraday_low": intraday_low,
+                    "source": "yfinance"
+                }
+        except Exception as ye:
+            logger.error(f"[Moomoo] get_volume yfinance fallback failed for {symbol}: {ye}")
+
+        return {
+            "success": False,
+            "volume_ratio": 1.0,
+            "volume_signal": "NORMAL",
+            "previous_close": 0.0,
+            "open_price": 0.0,
+            "intraday_high": 0.0,
+            "intraday_low": 0.0,
+            "error": f"Failed to fetch volume data for {symbol}"
+        }
 
     def auto_reconnect(self, max_attempts: int = 3):
         """Wraps connect() with retry logic."""

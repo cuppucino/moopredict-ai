@@ -32,6 +32,11 @@ TICKER_BASE_PARAMS = {
         'vwap': {'k': 2.0},
         'reversal': {'conf_threshold': 50},
         'volume_profile': {'shape_window': 72, 'vol_threshold': 1.0}
+    },
+    # PROVISIONAL — copied from QQQ for pipeline validation. Run optimizer.optimize_* per-strategy on NVDA before treating p-values as meaningful.
+    'NVDA': {
+        'vwap': {'k': 1.0},
+        'volume_profile': {'shape_window': 24, 'vol_threshold': 0.5}
     }
 }
 
@@ -60,6 +65,11 @@ TICKER_WEIGHTS = {
         'reversal': 0.4900,
         'vwap': 0.2776,
         'volume_profile': 0.2324
+    },
+    # PROVISIONAL — copied from QQQ for pipeline validation.
+    'NVDA': {
+        'volume_profile': 0.7368,
+        'vwap': 0.2632
     }
 }
 

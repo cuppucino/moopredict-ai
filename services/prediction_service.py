@@ -6,6 +6,38 @@ from core.database import SessionLocal, Prediction
 from services.moomoo_service import moomoo_service
 
 from services.validation_service import validation_service
+from services.political_monitor import political_monitor
+from services.news_scraper import news_scraper
+
+def generate_thesis_from_citations(symbol: str, direction: str, citations: list) -> str:
+    """Build a human-readable thesis string citing each catalyst."""
+    try:
+        lines = [f"{direction} on {symbol}. Catalysts:"]
+        tweets = [c for c in citations if c["type"] == "tweet"]
+        news = [c for c in citations if c["type"] == "news"]
+
+        # Sort tweets by absolute weight descending, take top 3
+        sorted_tweets = sorted(tweets, key=lambda c: -abs(c.get("weight", 0)))[:3]
+        for t in sorted_tweets:
+            sign = "+" if t.get("weight", 0) > 0 else "-"
+            ts = t.get("timestamp", "")[:19]
+            lines.append(
+                f"  {sign} Tier-{t.get('tier')} @{t.get('handle')} ({ts}): "
+                f"{t.get('content', '')[:80]}... ({t.get('sentiment')})"
+            )
+
+        # Sort news by absolute weight descending, take top 2
+        sorted_news = sorted(news, key=lambda c: -abs(c.get("weight", 0)))[:2]
+        for n in sorted_news:
+            sign = "+" if n.get("weight", 0) > 0 else "-"
+            lines.append(
+                f"  {sign} News [{n.get('source')}]: {n.get('headline', '')[:80]}..."
+            )
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"[Prediction] Error generating thesis: {e}")
+        return f"{direction} on {symbol} (Error generating citations thesis)"
 
 class PredictionService:
     def create_prediction(
@@ -64,13 +96,77 @@ class PredictionService:
             from services.data_freshness import freshness_registry
             freshness_snapshot = freshness_registry.stamp_prediction_context(symbol)
             
+            # --- Catalyst Extraction (Tweets + News) ---
+
+            
+            tweets = political_monitor.get_recent_ticker_tweets(symbol, hours=24)
+            news = news_scraper.get_recent_for_ticker(symbol, hours=24)
+            
+            confidence_delta = 0.0
+            citations = []
+            
+            # VIP Tweets modifier
+            for tweet in tweets:
+                tier = tweet.get("tier")
+                sent = tweet.get("sentiment")
+                weight = {"S": 0.20, "A": 0.10, "B": 0.05}.get(tier, 0.0)
+                
+                if sent == "neutral":
+                    signed_weight = 0.0
+                else:
+                    align = (sent == "bullish" and direction == "UP") or (sent == "bearish" and direction == "DOWN")
+                    signed_weight = weight if align else -weight
+                
+                confidence_delta += signed_weight * 100
+                citations.append({
+                    "type": "tweet",
+                    "handle": tweet.get("handle"),
+                    "tier": tier,
+                    "timestamp": tweet.get("timestamp"),
+                    "content": tweet.get("content"),
+                    "sentiment": sent,
+                    "weight": signed_weight
+                })
+                
+            # News Headlines modifier
+            for headline in news:
+                sent = headline.get("sentiment")
+                if sent == "neutral":
+                    signed_weight = 0.0
+                else:
+                    align = (sent == "bullish" and direction == "UP") or (sent == "bearish" and direction == "DOWN")
+                    signed_weight = 0.05 if align else -0.05
+                    
+                confidence_delta += signed_weight * 100
+                citations.append({
+                    "type": "news",
+                    "source": headline.get("source"),
+                    "timestamp": headline.get("timestamp"),
+                    "headline": headline.get("headline"),
+                    "sentiment": sent,
+                    "weight": signed_weight
+                })
+                
+            # No catalyst penalty
+            if not tweets and not news:
+                confidence_delta -= 5.0
+                
+            # Apply bounds
+            final_confidence = max(20.0, min(95.0, confidence + confidence_delta))
+            
+            # Build cited thesis
+            if citations:
+                thesis = generate_thesis_from_citations(symbol, direction, citations)
+            else:
+                thesis = f"{direction} on {symbol} from TA composite only (no catalysts in 24h)"
+            
             prediction = Prediction(
                 symbol=symbol,
                 direction=direction,
-                confidence=confidence, # User's manual confidence
-                confidence_score=auto_conf, # Engine's calculated confidence
-                signal_summary=consensus, # Full signal breakdown
-                catalyst=catalyst,
+                confidence=final_confidence,
+                confidence_score=auto_conf,
+                signal_summary=consensus,
+                catalyst=thesis,
                 category=category,
                 timeframe_days=timeframe_days,
                 entry_price=entry_price,
@@ -78,7 +174,8 @@ class PredictionService:
                 pattern_id=pattern_id,
                 deadline=datetime.utcnow() + timedelta(days=timeframe_days),
                 created_at=datetime.utcnow(),
-                notes=f"Freshness: {freshness_snapshot}" # Storing freshness in notes for now
+                notes=f"Freshness: {freshness_snapshot}",
+                thesis_citations=citations
             )
             
             db.add(prediction)

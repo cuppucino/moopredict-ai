@@ -180,8 +180,12 @@ def seed_mara_aggregator():
 
 def run_nightly_job():
     """
-    Main execution wrapper for the nightly MCPT job, checking trading-day constraints.
+    Main execution wrapper for the nightly MCPT job, checking trading-day constraints,
+    loading fresh daily data via yfinance, and executing in-sample and walk-forward MCPT validations.
     """
+    from services.mcpt.validator import run_insample_mcpt, run_walkforward_mcpt
+    import yfinance as yf
+    
     try:
         today = datetime.utcnow()
         if not is_trading_day(today):
@@ -189,7 +193,75 @@ def run_nightly_job():
             return False
             
         logger.info("Executing nightly MCPT status refresh...")
-        # Nightly job would load fresh data and run MCPT validation here
+        session = SessionLocal()
+        
+        # We will retrieve tickers from TICKER_BASE_PARAMS / TICKER_WEIGHTS
+        tickers = ['MARA', 'CVX', 'SPY', 'QQQ', 'AAPL', 'NVDA']
+        strategy = 'signal_aggregator'
+        
+        # Use env variable to allow fast dry runs during testing
+        n_perms_wf = int(os.getenv("MCPT_PERMS_WF", "200"))
+        n_perms_is = int(os.getenv("MCPT_PERMS_IS", "1000"))
+        n_perms_mini = int(os.getenv("MCPT_PERMS_MINI", "50"))
+        
+        logger.info(f"Nightly settings: perms_wf={n_perms_wf}, perms_is={n_perms_is}, perms_mini={n_perms_mini}")
+        
+        for ticker in tickers:
+            try:
+                logger.info(f"Fetching historical data for {ticker}...")
+                # Download daily data. Walkforward lookback is 1500 daily bars, which is ~6 years of trading days.
+                # Download 8 years to ensure we have ample data.
+                df = yf.download(ticker, period="8y", interval="1d", progress=False)
+                if df.empty or len(df) < 1600:
+                    data_len = 0 if df.empty else len(df)
+                    msg = f"[MCPT] Skipping {ticker}: insufficient data ({data_len} bars < 1600 minimum). Investigate yfinance feed."
+                    logger.error(msg)
+                    notification_queue.enqueue(msg, level="warning", category="mcpt")
+                    continue
+                    
+                # Format column names to lowercase for adapters, handling yfinance MultiIndex tuples
+                df.columns = [col[0].lower() if isinstance(col, tuple) else col.lower() for col in df.columns]
+                
+                # Check if it has the required columns
+                required_cols = ['open', 'high', 'low', 'close', 'volume']
+                if not all(col in df.columns for col in required_cols):
+                    logger.warning(f"Data for {ticker} is missing required columns. Had: {df.columns}. Skipping.")
+                    continue
+                
+                logger.info(f"Running In-sample MCPT for {strategy}-{ticker}...")
+                insample_res = run_insample_mcpt(strategy, df, n_perms=n_perms_is, min_trades=10, ticker=ticker)
+                
+                logger.info(f"Running Walk-forward MCPT for {strategy}-{ticker}...")
+                wf_res = run_walkforward_mcpt(
+                    df,
+                    ticker=ticker,
+                    n_perms=n_perms_wf,
+                    min_trades=10,
+                    train_lookback=1500,
+                    train_step=100,
+                    n_perms_mini=n_perms_mini,
+                    use_equal_weights=True,
+                    consensus_threshold=0.5
+                )
+                
+                if insample_res['message'] == 'SUCCESS' and wf_res['message'] == 'SUCCESS':
+                    update_mcpt_status(
+                        session=session,
+                        strategy=strategy,
+                        ticker=ticker,
+                        insample_p=insample_res['p_value'],
+                        wf_p=wf_res['p_value'],
+                        real_pf=wf_res['real_pf']
+                    )
+                else:
+                    logger.warning(
+                        f"MCPT did not succeed for {strategy}-{ticker}. "
+                        f"Insample msg: {insample_res['message']}, WF msg: {wf_res['message']}"
+                    )
+            except Exception as ticker_error:
+                logger.error(f"Error executing nightly MCPT for {ticker}: {ticker_error}")
+                
+        session.close()
         return True
     except Exception as error:
         logger.error(f"Nightly MCPT job execution failed: {error}")

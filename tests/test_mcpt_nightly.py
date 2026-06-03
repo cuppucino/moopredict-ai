@@ -195,3 +195,53 @@ def test_api_mcpt_strategies_endpoint():
             app.dependency_overrides.clear()
     except Exception as error:
         pytest.fail(f"test_api_mcpt_strategies_endpoint failed: {error}")
+
+def test_validation_script_insufficient_data():
+    """Verify that run_strategy_validation raises ValueError on insufficient data (<1600 bars)."""
+    import pandas as pd
+    import numpy as np
+    from scripts.run_full_validation import run_strategy_validation
+    
+    # Mock yfinance to return a DataFrame with 1500 rows (less than 1600 minimum)
+    dummy_data = pd.DataFrame(
+        np.random.randn(1500, 5),
+        columns=['Open', 'High', 'Low', 'Close', 'Volume'],
+        index=pd.date_range("2026-01-01", periods=1500)
+    )
+    
+    mock_session = MagicMock()
+    
+    with patch('yfinance.download', return_value=dummy_data):
+        with pytest.raises(ValueError) as exc_info:
+            run_strategy_validation('signal_aggregator', 'MARA', mock_session)
+        assert "Insufficient daily bars for walk-forward of MARA" in str(exc_info.value)
+
+def test_nightly_job_insufficient_data_skips_and_alerts():
+    """Verify that run_nightly_job logs, enqueues alert, and continues on insufficient data."""
+    import pandas as pd
+    import numpy as np
+    from services.mcpt_nightly import run_nightly_job
+    
+    # We mock yfinance download to return <1600 bars for all tickers
+    dummy_small = pd.DataFrame(
+        np.random.randn(1000, 5),
+        columns=['Open', 'High', 'Low', 'Close', 'Volume'],
+        index=pd.date_range("2026-01-01", periods=1000)
+    )
+    
+    with patch('yfinance.download', return_value=dummy_small), \
+         patch('services.mcpt_nightly.notification_queue') as mock_queue, \
+         patch('services.mcpt_nightly.SessionLocal') as mock_db, \
+         patch('services.mcpt_nightly.is_trading_day', return_value=True):
+         
+        res = run_nightly_job()
+        
+        # Should return True (since the job completed without crashing)
+        assert res is True
+        
+        # Check that enqueue was called for each ticker (6 tickers total)
+        assert mock_queue.enqueue.call_count == 6
+        first_call_args = mock_queue.enqueue.call_args_list[0]
+        assert "[MCPT] Skipping" in first_call_args[0][0]
+        assert "insufficient data" in first_call_args[0][0]
+

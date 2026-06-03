@@ -4,6 +4,8 @@ import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from loguru import logger
+from services.mcpt.costs import PER_FLIP_BPS
+
 
 class BacktestEngine:
     """
@@ -35,7 +37,7 @@ class BacktestEngine:
             exits = rsi.rsi_above(upper)
 
             # Run Portfolio
-            pf = vbt.Portfolio.from_signals(close, entries, exits, init_cash=10000, fees=0.001)
+            pf = vbt.Portfolio.from_signals(close, entries, exits, init_cash=10000, fees=PER_FLIP_BPS)
 
             stats = pf.stats(settings=dict(freq='D'))
             
@@ -70,7 +72,7 @@ class BacktestEngine:
             entries = short_ema.ma_crossed_above(long_ema.ma)
             exits = short_ema.ma_crossed_below(long_ema.ma)
 
-            pf = vbt.Portfolio.from_signals(close, entries, exits, init_cash=10000, fees=0.001)
+            pf = vbt.Portfolio.from_signals(close, entries, exits, init_cash=10000, fees=PER_FLIP_BPS)
             stats = pf.stats(settings=dict(freq='D'))
 
             return {
@@ -106,7 +108,7 @@ class BacktestEngine:
             entries = close.vbt.crossed_above(vwap)
             exits = close.vbt.crossed_below(vwap)
 
-            pf = vbt.Portfolio.from_signals(close, entries, exits, init_cash=10000, fees=0.001)
+            pf = vbt.Portfolio.from_signals(close, entries, exits, init_cash=10000, fees=PER_FLIP_BPS)
             stats = pf.stats(settings=dict(freq='D'))
 
             return {

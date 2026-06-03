@@ -157,8 +157,8 @@ class Prediction(Base):
     confidence_score = Column(Float)     # 0-100
     signal_summary = Column(JSON)        # Breakdown of all signals
     postmortem = Column(JSON)            # Post-resolution analysis
+    thesis_citations = Column(JSON, nullable=True, default=list)
     created_at = Column(DateTime, default=datetime.utcnow)
-
 class PaperTrade(Base):
     __tablename__ = "paper_trades"
     id = Column(Integer, primary_key=True, index=True)
@@ -269,6 +269,8 @@ class SystemState(Base):
     id = Column(Integer, primary_key=True, index=True)
     key = Column(String(50), unique=True, nullable=False)
     value = Column(Text)
+    real_trading_unlocked = Column(Boolean, nullable=False, default=False)
+    unlock_history = Column(JSON, nullable=True, default=list)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
 class MCPTResult(Base):

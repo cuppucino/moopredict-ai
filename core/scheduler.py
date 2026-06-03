@@ -20,8 +20,12 @@ from services.watchdog import watchdog_service
 
 class Scheduler:
     def __init__(self):
-        # Force UTC to avoid local timezone (e.g. MYT) offsets
-        self.scheduler = BackgroundScheduler(timezone=pytz.utc)
+        # Force UTC to avoid local timezone offsets and configure misfire grace time to prevent skipped checks
+        job_defaults = {
+            'coalesce': True,
+            'misfire_grace_time': 3600
+        }
+        self.scheduler = BackgroundScheduler(timezone=pytz.utc, job_defaults=job_defaults)
         self.is_running = False
 
     def init(self):
@@ -213,7 +217,16 @@ class Scheduler:
 
         self.scheduler.add_job(pattern_review_job, CronTrigger.from_crontab("0 6 * * 0", timezone=pytz.utc), id="pattern_review_job")
 
+        # Daily Track Record evaluation (21:30 UTC Mon-Fri)
+        from services import track_record
+        self.scheduler.add_job(track_record.run_daily_job, CronTrigger.from_crontab("30 21 * * 1-5", timezone=pytz.utc), id="track_record_daily")
+
         self.scheduler.start()
+        
+        # Trigger an initial heartbeat check in a background thread to ensure fresh startup state
+        import threading
+        threading.Thread(target=heartbeat_monitor.run_full_check, daemon=True, name="startup_heartbeat_check").start()
+        
         watchdog_service.start()
         self.is_running = True
         logger.info("[Scheduler] Jobs scheduled and running.")

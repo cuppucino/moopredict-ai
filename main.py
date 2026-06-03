@@ -558,6 +558,25 @@ def create_prediction(payload: dict):
 def get_prediction_stats():
     return prediction_service.get_stats()
 
+@app.get("/api/track-record")
+def get_track_record(db: Session = Depends(get_db)):
+    """Fetch openclaw's paper-trading track record and real trading unlock state."""
+    try:
+        from services.track_record import compute_metrics
+        from core.database import SystemState
+        
+        metrics = compute_metrics(db)
+        state = db.query(SystemState).filter(SystemState.key == "real_trading_unlocked").first()
+        
+        return {
+            **metrics,
+            "real_trading_unlocked": bool(state and state.real_trading_unlocked),
+            "unlock_history": (state.unlock_history if state else []),
+        }
+    except Exception as e:
+        logger.error(f"Error fetching track record API: {e}")
+        raise HTTPException(status_code=500, detail=f"Database or computation error: {str(e)}")
+
 @app.get("/api/predscore")
 def get_predscore_alias():
     """Alias for /api/predictions/stats as requested by user."""

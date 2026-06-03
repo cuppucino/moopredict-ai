@@ -20,58 +20,220 @@ VIP_ACCOUNTS = {
     "realDonaldTrump": {
         "display": "Donald Trump",
         "tier": "S",
-        "impact": "Market-wide, geopolitics, tariffs, crypto",
+        "impact": "Tariffs, macro, policy",
         "emoji": "🇺🇸"
+    },
+    "jeromehpowell": {
+        "display": "Fed Chair Powell",
+        "tier": "S",
+        "impact": "Interest rates, monetary policy",
+        "emoji": "🏦"
+    },
+    "SecScottBessent": {
+        "display": "Treasury Sec. Bessent",
+        "tier": "S",
+        "impact": "Fiscal policy, debt, trade",
+        "emoji": "💵"
     },
     "elonmusk": {
         "display": "Elon Musk",
-        "tier": "S",
-        "impact": "Crypto, tech, TSLA, DOGE",
+        "tier": "A",
+        "impact": "TSLA, crypto, tech",
         "emoji": "🚀"
     },
-    "federalreserve": {
-        "display": "Federal Reserve",
+    "JensenHuang": {
+        "display": "Jensen Huang",
         "tier": "A",
-        "impact": "Rates, bonds, market-wide",
-        "emoji": "🏦"
+        "impact": "NVDA, AI, semiconductors",
+        "emoji": "🤖"
     },
-    "SecYellen": {
-        "display": "Treasury Secretary",
+    "sundarpichai": {
+        "display": "Sundar Pichai",
         "tier": "A",
-        "impact": "Fiscal, bonds, dollar",
-        "emoji": "💵"
+        "impact": "GOOGL, AI, search",
+        "emoji": "🔍"
     },
-    "SECGov": {
-        "display": "SEC",
+    "sama": {
+        "display": "Sam Altman",
         "tier": "A",
-        "impact": "Regulation, crypto, enforcement",
-        "emoji": "⚖️"
+        "impact": "AI, OpenAI",
+        "emoji": "🧠"
     },
-    "GaryGensler": {
-        "display": "Gary Gensler",
+    "tim_cook": {
+        "display": "Tim Cook",
         "tier": "A",
-        "impact": "Crypto, regulation",
-        "emoji": "🏛️"
+        "impact": "AAPL, tech, supply chain",
+        "emoji": "🍎"
     },
-    "WhiteHouse": {
-        "display": "White House",
+    "lisasu": {
+        "display": "Lisa Su",
         "tier": "A",
-        "impact": "Policy, executive orders",
-        "emoji": "🏛️"
+        "impact": "AMD, AI, semiconductors",
+        "emoji": "💻"
+    },
+    "zuck": {
+        "display": "Mark Zuckerberg",
+        "tier": "A",
+        "impact": "META, social media, VR",
+        "emoji": "👓"
+    },
+    "JDVance": {
+        "display": "VP JD Vance",
+        "tier": "B",
+        "impact": "Administration policy, tariffs",
+        "emoji": "🦅"
+    },
+    "BillAckman": {
+        "display": "Bill Ackman",
+        "tier": "B",
+        "impact": "Pershing Square, activist investor",
+        "emoji": "📊"
+    },
+    "michaeljburry": {
+        "display": "Michael Burry",
+        "tier": "B",
+        "impact": "Scion Asset Management, macro",
+        "emoji": "📉"
     },
     "CathieDWood": {
         "display": "Cathie Wood",
         "tier": "B",
-        "impact": "Growth, tech, ARKK",
+        "impact": "ARK Invest, innovation",
         "emoji": "📈"
+    },
+    "davidtepper": {
+        "display": "David Tepper",
+        "tier": "B",
+        "impact": "Appaloosa, equities, macro",
+        "emoji": "🎯"
+    },
+    "elerianm": {
+        "display": "Mohamed El-Erian",
+        "tier": "B",
+        "impact": "Allianz, economic commentary",
+        "emoji": "📝"
+    },
+    "jimcramer": {
+        "display": "Jim Cramer",
+        "tier": "B",
+        "impact": "CNBC Mad Money, retail sentiment",
+        "emoji": "📺"
     },
     "saylor": {
         "display": "Michael Saylor",
         "tier": "B",
-        "impact": "Crypto, BTC, MSTR",
+        "impact": "BTC, MicroStrategy",
         "emoji": "🪙"
+    },
+    "federalreserve": {
+        "display": "Federal Reserve",
+        "tier": "B",
+        "impact": "Official statements, fed minutes",
+        "emoji": "🏛️"
+    },
+    "SECGov": {
+        "display": "SEC",
+        "tier": "B",
+        "impact": "Regulatory filings, crypto notices",
+        "emoji": "⚖️"
+    },
+    "VitalikButerin": {
+        "display": "Vitalik Buterin",
+        "tier": "B",
+        "impact": "ETH, crypto, web3",
+        "emoji": "⛓️"
     }
 }
+
+VIP_TIERS = {
+    "S": {
+        "realDonaldTrump": {"display": "President Trump"},
+        "jeromehpowell":   {"display": "Fed Chair Powell"},
+        "SecScottBessent": {"display": "Treasury Sec. Bessent"},
+    },
+    "A": {
+        "elonmusk":     {"display": "Elon Musk"},
+        "JensenHuang":  {"display": "Jensen Huang (NVDA)"},
+        "sundarpichai": {"display": "Sundar Pichai (GOOGL)"},
+        "sama":         {"display": "Sam Altman (OpenAI)"},
+        "tim_cook":     {"display": "Tim Cook (AAPL)"},
+        "lisasu":       {"display": "Lisa Su (AMD)"},
+        "zuck":         {"display": "Mark Zuckerberg (META)"},
+    },
+    "B": {
+        "JDVance":         {"display": "VP JD Vance"},
+        "BillAckman":      {"display": "Bill Ackman"},
+        "michaeljburry":   {"display": "Michael Burry"},
+        "CathieDWood":     {"display": "Cathie Wood (ARK)"},
+        "davidtepper":     {"display": "David Tepper"},
+        "elerianm":        {"display": "Mohamed El-Erian"},
+        "jimcramer":       {"display": "Jim Cramer"},
+        "saylor":          {"display": "Michael Saylor"},
+        "federalreserve":  {"display": "Federal Reserve"},
+        "SECGov":          {"display": "SEC"},
+        "VitalikButerin":  {"display": "Vitalik Buterin"},
+    },
+}
+
+def get_tier(handle: str) -> str:
+    """Return 'S', 'A', 'B', or 'UNKNOWN' for a given handle."""
+    try:
+        for tier, members in VIP_TIERS.items():
+            if handle in members:
+                return tier
+        return "UNKNOWN"
+    except Exception as e:
+        logger.error(f"[PoliticalMonitor] Error in get_tier for handle {handle}: {e}")
+        return "UNKNOWN"
+
+TICKER_TO_KEYWORDS = {
+    "NVDA": [r"\bnvda\b", r"\bnvidia\b", r"\bjensen\b"],
+    "AAPL": [r"\baapl\b", r"\bapple\b", r"\biphone\b"],
+    "DELL": [r"\bdell\b"],
+    "TSLA": [r"\btsla\b", r"\btesla\b", r"\belon\b"],
+    "GOOGL": [r"\bgoogl\b", r"\bgoogle\b", r"\bsundar\b"],
+    "META": [r"\bmeta\b", r"\bzuck\b", r"\bfacebook\b"],
+    "AMD": [r"\bamd\b", r"\blisa su\b"],
+    "MSFT": [r"\bmsft\b", r"\bmicrosoft\b"],
+    "BTC": [r"\bbtc\b", r"\bbitcoin\b"],
+    "ETH": [r"\beth\b", r"\bethereum\b", r"\bvitalik\b"]
+}
+
+def matches_ticker(text: str, ticker: str) -> bool:
+    """Check if the text mentions a ticker symbol or its associated company names."""
+    try:
+        # Check direct $TICKER mention (e.g. $AAPL)
+        if re.search(r"\$" + re.escape(ticker), text, re.IGNORECASE):
+            return True
+        
+        # Check keywords if defined
+        keywords = TICKER_TO_KEYWORDS.get(ticker.upper(), [r"\b" + re.escape(ticker) + r"\b"])
+        for kw in keywords:
+            if re.search(kw, text, re.IGNORECASE):
+                return True
+        return False
+    except Exception as e:
+        logger.error(f"[PoliticalMonitor] Error matching ticker {ticker}: {e}")
+        return False
+
+def _get_sentiment(text: str) -> str:
+    """Simple keyword-based sentiment classification."""
+    try:
+        text_lower = text.lower()
+        bullish_words = ["buy", "bullish", "up", "great", "long", "call"]
+        bearish_words = ["sell", "bearish", "crash", "dump", "short", "put"]
+        
+        bull_count = sum(1 for w in bullish_words if w in text_lower)
+        bear_count = sum(1 for w in bearish_words if w in text_lower)
+        
+        if bull_count > bear_count:
+            return "bullish"
+        elif bear_count > bull_count:
+            return "bearish"
+        return "neutral"
+    except Exception as e:
+        logger.error(f"[PoliticalMonitor] Error in _get_sentiment: {e}")
+        return "neutral"
 
 KEYWORD_TIERS = {
     "P0": [
@@ -138,7 +300,11 @@ class PoliticalMonitor:
                 r"\bbitcoin\b": "BTC",
                 r"\bbtc\b": "BTC",
                 r"\bapple\b": "AAPL",
-                r"\bmicrosoft\b": "MSFT"
+                r"\bmicrosoft\b": "MSFT",
+                r"\bnvidia\b": "NVDA",
+                r"\bgoogle\b": "GOOGL",
+                r"\bmeta\b": "META",
+                r"\bamd\b": "AMD"
             }
             for pattern, ticker in mappings.items():
                 if re.search(pattern, text, re.IGNORECASE):
@@ -242,6 +408,45 @@ class PoliticalMonitor:
                 "score": 0.0,
                 "post_count": 0
             }
+        finally:
+            db.close()
+
+    def get_recent_ticker_tweets(self, ticker: str, hours: int = 24) -> list:
+        """
+        Return tweets from VIP handles in the last `hours` that mention `ticker`
+        or its associated company name.
+
+        Returns list of dicts: {handle, tier, timestamp, content, sentiment}
+        """
+        db = SessionLocal()
+        try:
+            time_threshold = datetime.utcnow() - timedelta(hours=hours)
+            posts = db.query(SocialPost).filter(
+                SocialPost.platform == "X",
+                SocialPost.scraped_at >= time_threshold
+            ).all()
+
+            monitored_handles = set(VIP_ACCOUNTS.keys())
+
+            results = []
+            for post in posts:
+                if post.author not in monitored_handles:
+                    continue
+
+                # Check if this post mentions the ticker
+                if matches_ticker(post.content, ticker):
+                    sentiment = _get_sentiment(post.content)
+                    results.append({
+                        "handle": post.author,
+                        "tier": get_tier(post.author),
+                        "timestamp": post.posted_at.isoformat() if post.posted_at else post.scraped_at.isoformat(),
+                        "content": post.content,
+                        "sentiment": sentiment
+                    })
+            return results
+        except Exception as e:
+            logger.error(f"[PoliticalMonitor] Error in get_recent_ticker_tweets: {e}")
+            return []
         finally:
             db.close()
 
