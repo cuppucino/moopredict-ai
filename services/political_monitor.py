@@ -186,30 +186,38 @@ def get_tier(handle: str) -> str:
         logger.error(f"[PoliticalMonitor] Error in get_tier for handle {handle}: {e}")
         return "UNKNOWN"
 
-TICKER_TO_KEYWORDS = {
-    "NVDA": [r"\bnvda\b", r"\bnvidia\b", r"\bjensen\b"],
-    "AAPL": [r"\baapl\b", r"\bapple\b", r"\biphone\b"],
-    "DELL": [r"\bdell\b"],
-    "TSLA": [r"\btsla\b", r"\btesla\b", r"\belon\b"],
-    "GOOGL": [r"\bgoogl\b", r"\bgoogle\b", r"\bsundar\b"],
-    "META": [r"\bmeta\b", r"\bzuck\b", r"\bfacebook\b"],
-    "AMD": [r"\bamd\b", r"\blisa su\b"],
-    "MSFT": [r"\bmsft\b", r"\bmicrosoft\b"],
-    "BTC": [r"\bbtc\b", r"\bbitcoin\b"],
-    "ETH": [r"\beth\b", r"\bethereum\b", r"\bvitalik\b"]
+TICKER_ALIASES = {
+    "GOOGL": ["Google", "Alphabet", "Gemma", "Bard", "Pichai", "Pixel", "YouTube", "DeepMind"],
+    "GOOG":  ["Google", "Alphabet", "Gemma", "Bard", "Pichai", "Pixel", "YouTube", "DeepMind"],
+    "NVDA":  ["Nvidia", "Jensen", "Huang", "CUDA", "Blackwell", "Hopper", "RTX"],
+    "AAPL":  ["Apple", "iPhone", "iPad", "Tim Cook", "Cook"],
+    "META":  ["Meta", "Facebook", "Instagram", "WhatsApp", "Zuckerberg", "Zuck", "Threads"],
+    "TSLA":  ["Tesla", "Elon", "Musk", "Cybertruck", "Robotaxi", "FSD"],
+    "MSFT":  ["Microsoft", "Satya", "Nadella", "Azure", "Copilot"],
+    "AMZN":  ["Amazon", "AWS", "Bezos", "Andy Jassy"],
+    "MARA":  ["Marathon Digital", "Marathon"],
+    "CVX":   ["Chevron"],
+    "SPY":   ["S&P 500", "SPX"],
+    "QQQ":   ["Nasdaq 100", "QQQ"],
 }
 
 def matches_ticker(text: str, ticker: str) -> bool:
-    """Check if the text mentions a ticker symbol or its associated company names."""
+    """Check if the text mentions a ticker symbol or its aliases."""
     try:
+        ticker = ticker.upper()
         # Check direct $TICKER mention (e.g. $AAPL)
-        if re.search(r"\$" + re.escape(ticker), text, re.IGNORECASE):
+        if re.search(r"\$" + re.escape(ticker) + r"\b", text, re.IGNORECASE):
             return True
         
-        # Check keywords if defined
-        keywords = TICKER_TO_KEYWORDS.get(ticker.upper(), [r"\b" + re.escape(ticker) + r"\b"])
-        for kw in keywords:
-            if re.search(kw, text, re.IGNORECASE):
+        # Check ticker symbol with word boundaries (e.g. \bAAPL\b)
+        if re.search(r"\b" + re.escape(ticker) + r"\b", text, re.IGNORECASE):
+            return True
+        
+        # Check aliases
+        aliases = TICKER_ALIASES.get(ticker, [])
+        for alias in aliases:
+            pattern = r"\b" + re.escape(alias) + r"\b"
+            if re.search(pattern, text, re.IGNORECASE):
                 return True
         return False
     except Exception as e:

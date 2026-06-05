@@ -23,6 +23,7 @@ class MoomooService:
         self._pos_cache_expiry = datetime.now()
         self._bal_cache = None
         self._bal_cache_expiry = datetime.now()
+        self._price_cache = {}
 
     def _scan_ip(self, ip: str) -> Optional[str]:
         """Check if port is open on a given IP."""
@@ -370,6 +371,10 @@ class MoomooService:
 
                 if last_price > 0:
                     freshness_registry.register_update("moomoo_quote", symbol)
+                    self._price_cache[symbol] = {
+                        "price": last_price,
+                        "as_of": datetime.utcnow()
+                    }
                     return {
                         "symbol": symbol,
                         "last_price": last_price,
@@ -380,7 +385,7 @@ class MoomooService:
                 logger.error(f"[Moomoo] Quote exception for {symbol}: {e}")
 
         # Tier 4: yfinance fallback (delayed but better than nothing)
-        try:
+        def _fetch_yfinance():
             import yfinance as yf
             yf_symbol = symbol.split(".")[-1] if "." in symbol else symbol
             logger.info(f"[Moomoo] Attempting yfinance fallback for {yf_symbol}...")
@@ -394,20 +399,49 @@ class MoomooService:
                 hist = ticker.history(period="1d")
                 if not hist.empty:
                     last_price = float(hist['Close'].iloc[-1])
+            return last_price
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_fetch_yfinance)
+                last_price = future.result(timeout=5.0)
             
             if last_price > 0:
                 freshness_registry.register_update("yfinance_fallback", symbol)
                 logger.warning(f"[Moomoo] Using yfinance fallback for {symbol}: ${last_price}")
+                self._price_cache[symbol] = {
+                    "price": last_price,
+                    "as_of": datetime.utcnow()
+                }
                 return {
                     "symbol": symbol,
                     "last_price": last_price,
                     "timestamp": datetime.now().isoformat(),
                     "source": "yfinance"
                 }
+        except TimeoutError:
+            logger.error(f"[Moomoo] yfinance fallback timed out (5.0s limit) for {symbol}")
         except Exception as ye:
             logger.error(f"[Moomoo] yfinance fallback failed for {symbol}: {ye}")
+
+        # Tier 5: In-memory cache fallback
+        if symbol in self._price_cache:
+            cache_entry = self._price_cache[symbol]
+            cached_price = cache_entry["price"]
+            as_of = cache_entry["as_of"]
+            age_seconds = (datetime.utcnow() - as_of).total_seconds()
+            stale = age_seconds > 300.0  # 5 minutes
             
-        return {"success": False, "error": f"Failed to get price for {symbol} from any source"}
+            logger.warning(f"[Moomoo] Using cached price for {symbol}: ${cached_price} (Age: {age_seconds:.1f}s, Stale: {stale})")
+            return {
+                "symbol": symbol,
+                "last_price": cached_price,
+                "timestamp": as_of.isoformat(),
+                "source": "cache",
+                "stale": stale
+            }
+            
+        return {"success": False, "last_price": None, "error": "quote_timeout", "stale": False}
 
     def get_volume(self, symbol: str) -> Dict:
         """Fetch volume, gap, and snapshot data for a symbol with yfinance fallback."""

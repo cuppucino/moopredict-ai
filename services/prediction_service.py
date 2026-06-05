@@ -60,7 +60,9 @@ class PredictionService:
             symbol = symbol.upper().strip()
             direction = direction.upper().strip()
             
-            # ─── Safety Checks ──────────────────────────────────────────────────
+            # Step 1: Input Validation & Safety checks
+            logger.info(f"[Prediction] step 1 started for {symbol} (Input validation)")
+            warnings = []
             if not force:
                 v_res = validation_service.validate_prediction(symbol, direction)
                 if not v_res["passed"]:
@@ -73,9 +75,10 @@ class PredictionService:
                     }
                 elif v_res["warnings"]:
                     logger.info(f"[Prediction] Safety check WARNINGS for {symbol}: {v_res['warnings']}")
-                    # We still proceed but include warnings in the result
+                warnings = v_res.get("warnings", [])
             
-            # --- Signal Aggregation ---
+            # Step 2: Signal Aggregation & Consensus retrieval
+            logger.info(f"[Prediction] step 2 started for {symbol} (Signal consensus)")
             from services.signal_aggregator import signal_aggregator
             consensus = signal_aggregator.get_consensus(symbol)
             auto_conf = consensus.get("confidence_score", 50)
@@ -89,19 +92,28 @@ class PredictionService:
                     "can_override": True
                 }
 
-            # Fetch current price for entry
+            # Step 3: Real-time Quote fetching
+            logger.info(f"[Prediction] step 3 started for {symbol} (Fetching stock quote)")
             price_data = moomoo_service.get_stock_quote(symbol)
-            entry_price = price_data.get("last_price", 0.0)
+            entry_price = price_data.get("last_price")
+            
+            if entry_price is None or entry_price <= 0:
+                logger.error(f"[Prediction] Failed to get entry price for {symbol}: {price_data.get('error')}")
+                return {
+                    "success": False,
+                    "error": price_data.get("error") or "quote_timeout"
+                }
             
             from services.data_freshness import freshness_registry
             freshness_snapshot = freshness_registry.stamp_prediction_context(symbol)
             
-            # --- Catalyst Extraction (Tweets + News) ---
-
-            
+            # Step 4: Scraping recent tweets and news headlines (catalyst data)
+            logger.info(f"[Prediction] step 4 started for {symbol} (Fetching catalyst data)")
             tweets = political_monitor.get_recent_ticker_tweets(symbol, hours=24)
             news = news_scraper.get_recent_for_ticker(symbol, hours=24)
             
+            # Step 5: Citation assembly & final confidence calculation
+            logger.info(f"[Prediction] step 5 started for {symbol} (Citations and thesis assembly)")
             confidence_delta = 0.0
             citations = []
             
@@ -160,6 +172,8 @@ class PredictionService:
             else:
                 thesis = f"{direction} on {symbol} from TA composite only (no catalysts in 24h)"
             
+            # Step 6: Database transaction (inserting the Prediction object)
+            logger.info(f"[Prediction] step 6 started for {symbol} (Writing prediction to database)")
             prediction = Prediction(
                 symbol=symbol,
                 direction=direction,
@@ -184,14 +198,11 @@ class PredictionService:
             
             logger.info(f"[Prediction] Recorded #{prediction.id} for {symbol} ({direction})")
             
-            # If there were warnings even though it passed, return them
-            v_res = validation_service.validate_prediction(symbol, direction) if not force else {"warnings": []}
-            
             return {
                 "success": True, 
                 "prediction_id": prediction.id, 
                 "entry_price": entry_price,
-                "warnings": v_res.get("warnings", [])
+                "warnings": warnings
             }
             
         except Exception as e:
@@ -329,7 +340,8 @@ class PredictionService:
                     "direction": p.direction,
                     "confidence": p.confidence,
                     "deadline": p.deadline.isoformat(),
-                    "catalyst": p.catalyst
+                    "catalyst": p.catalyst,
+                    "thesis_citations": p.thesis_citations or []
                 } for p in preds
             ]
         finally:

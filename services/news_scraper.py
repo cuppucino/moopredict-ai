@@ -92,22 +92,74 @@ class NewsScraper:
     def get_recent_for_ticker(self, ticker: str, hours: int = 24) -> list:
         """
         Return news articles mentioning the ticker or company name in the last `hours`.
+        Tighter matcher: require ticker or company name to appear in the headline (not summary),
+        AND require it to be in the first half of the headline OR be the only ticker mentioned.
         """
         db = SessionLocal()
         try:
+            import re
             from datetime import timedelta
             time_threshold = datetime.utcnow() - timedelta(hours=hours)
             articles = db.query(NewsIntel).filter(
                 NewsIntel.scraped_at >= time_threshold
             ).all()
             
-            from services.political_monitor import matches_ticker, _get_sentiment
+            from services.political_monitor import matches_ticker, _get_sentiment, TICKER_ALIASES
             
+            def strip_publisher_suffix(headline_str: str) -> str:
+                pattern = r"\s*[-|]\s*(Google News|Reuters|CNBC|MarketWatch|BBC News|BBC|Yahoo Finance|Bloomberg|WSJ|Wall Street Journal)\s*$"
+                return re.sub(pattern, "", headline_str, flags=re.IGNORECASE).strip()
+            
+            def find_first_match_index(headline_str: str, tk: str):
+                tk = tk.upper()
+                patterns = [
+                    r"\$" + re.escape(tk) + r"\b",
+                    r"\b" + re.escape(tk) + r"\b"
+                ]
+                aliases = TICKER_ALIASES.get(tk, [])
+                for alias in aliases:
+                    patterns.append(r"\b" + re.escape(alias) + r"\b")
+                
+                first_idx = None
+                for pat in patterns:
+                    m = re.search(pat, headline_str, re.IGNORECASE)
+                    if m:
+                        start_idx = m.start()
+                        if first_idx is None or start_idx < first_idx:
+                            first_idx = start_idx
+                return first_idx
+
             results = []
             for art in articles:
-                text_to_search = f"{art.headline} {art.summary or ''}"
-                if matches_ticker(text_to_search, ticker):
-                    sentiment = _get_sentiment(text_to_search)
+                cleaned_headline = strip_publisher_suffix(art.headline)
+                
+                # 1. Require the ticker or company name to appear in the cleaned headline
+                if not matches_ticker(cleaned_headline, ticker):
+                    continue
+                
+                # 2. Require it to be in the first half of the headline OR be the only ticker mentioned.
+                first_idx = find_first_match_index(cleaned_headline, ticker)
+                if first_idx is None:
+                    continue
+                
+                # Check if it is in the first half of the headline
+                is_in_first_half = first_idx < (len(cleaned_headline) / 2)
+                
+                # Check if it is the only ticker mentioned (ignoring GOOG/GOOGL overlap)
+                other_tickers_found = False
+                for other_ticker in TICKER_ALIASES.keys():
+                    if other_ticker != ticker.upper():
+                        if {ticker.upper(), other_ticker} == {"GOOG", "GOOGL"}:
+                            continue
+                        if matches_ticker(cleaned_headline, other_ticker):
+                            other_tickers_found = True
+                            break
+                            
+                is_only_ticker = not other_tickers_found
+                
+                if is_in_first_half or is_only_ticker:
+                    text_to_analyze = f"{art.headline} {art.summary or ''}"
+                    sentiment = _get_sentiment(text_to_analyze)
                     results.append({
                         "source": art.source,
                         "timestamp": art.scraped_at.isoformat(),

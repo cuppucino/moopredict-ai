@@ -4,6 +4,7 @@ import pytz
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from loguru import logger
 
@@ -286,7 +287,7 @@ def get_smart_size(symbol: str, price: float = None):
     from services.risk_engine import risk_engine
     if not price:
         quote = moomoo_service.get_stock_quote(symbol)
-        price = quote.get("last_price", 0)
+        price = quote.get("last_price") or 0
     if price <= 0:
         return {"error": "Could not determine price."}
     return risk_engine.smart_position_size(symbol, price)
@@ -545,14 +546,43 @@ def create_prediction(payload: dict):
     if not all([symbol, direction, confidence, catalyst]):
         raise HTTPException(status_code=400, detail="Missing required fields")
     
-    return prediction_service.create_prediction(
-        symbol=symbol,
-        direction=direction,
-        confidence=float(confidence),
-        catalyst=catalyst,
-        category=payload.get("category", "general"),
-        timeframe_days=int(payload.get("timeframe", 7))
-    )
+    try:
+        parsed_confidence = float(confidence)
+        parsed_timeframe = int(payload.get("timeframe", 7))
+    except (ValueError, TypeError) as e:
+        logger.error(f"Invalid type in prediction creation request: {e}")
+        raise HTTPException(status_code=400, detail="Invalid confidence or timeframe parameter.")
+
+    try:
+        res = prediction_service.create_prediction(
+            symbol=symbol,
+            direction=direction,
+            confidence=parsed_confidence,
+            catalyst=catalyst,
+            category=payload.get("category", "general"),
+            timeframe_days=parsed_timeframe,
+            force=bool(payload.get("force", False))
+        )
+    except Exception as e:
+        logger.error(f"Failed to create prediction due to service error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error while creating prediction.")
+
+    if not res.get("success"):
+        if res.get("error") == "quote_timeout":
+            raise HTTPException(status_code=504, detail="Timeout retrieving stock quote.")
+        if res.get("error") == "Safety check failed.":
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "success": False,
+                    "error": "Safety check failed.",
+                    "warnings": res.get("warnings", []),
+                    "can_override": res.get("can_override", False),
+                    "hint": "Pass 'force': true in the payload to override after reviewing warnings."
+                }
+            )
+        raise HTTPException(status_code=400, detail=res.get("error", "Failed to create prediction."))
+    return res
 
 @app.get("/api/predictions/stats")
 def get_prediction_stats():
@@ -932,7 +962,7 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
             symbol = parts[1].upper()
             from services.risk_engine import risk_engine
             quote = moomoo_service.get_stock_quote(symbol)
-            price = quote.get("last_price", 0)
+            price = quote.get("last_price") or 0
             if price <= 0: return {"content": f"❌ Could not get price for {symbol}."}
             res = risk_engine.smart_position_size(symbol, price)
             if "error" in res: return {"content": f"❌ {res['error']}"}
@@ -1222,7 +1252,7 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 # 🔴 Rule: Risk Management Check (for Buy only)
                 if side == "BUY":
                     # If price is 0, get it from quote
-                    check_price = price if price > 0 else moomoo_service.get_stock_quote(symbol).get("last_price", 0)
+                    check_price = price if price > 0 else (moomoo_service.get_stock_quote(symbol).get("last_price") or 0)
                     risk_check = risk_service.calculate_position_size(symbol, check_price)
                     if "error" in risk_check:
                         return {"content": f"🛡️ *RISK BLOCK*\n{risk_check['error']}"}
@@ -1232,7 +1262,7 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
 
                 # 🔴 Rule: Treasurer Approval Layer
                 if "force" not in [p.lower() for p in parts]:
-                    check_price = price if price > 0 else moomoo_service.get_stock_quote(symbol).get("last_price", 0)
+                    check_price = price if price > 0 else (moomoo_service.get_stock_quote(symbol).get("last_price") or 0)
                     approval_req = treasurer_service.request_approval(symbol, side, qty, check_price)
                     if not approval_req["auto_approved"]:
                         return {"content": (
@@ -1631,7 +1661,7 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 price = float(parts[3]) if len(parts) > 3 else None
                 if not price:
                     quote = moomoo_service.get_stock_quote(symbol)
-                    price = quote.get("last_price", 0)
+                    price = quote.get("last_price") or 0
                 if not price:
                     return {"content": f"❌ Could not fetch price for {symbol}."}
                 res = paper_trading_service.open_trade(symbol, "BUY", qty, price)
@@ -1648,7 +1678,7 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 price = float(parts[3]) if len(parts) > 3 else None
                 if not price:
                     quote = moomoo_service.get_stock_quote(symbol)
-                    price = quote.get("last_price", 0)
+                    price = quote.get("last_price") or 0
                 portfolio = paper_trading_service.get_portfolio()
                 trade = next((p for p in portfolio if p['symbol'] == symbol), None)
                 if not trade:

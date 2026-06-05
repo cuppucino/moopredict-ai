@@ -136,7 +136,7 @@ class PaperTradingService:
             trades = db.query(PaperTrade).filter(PaperTrade.status == "OPEN").all()
             for t in trades:
                 quote = moomoo_service.get_stock_quote(t.symbol)
-                current_price = quote.get("last_price", t.entry_price) if quote else t.entry_price
+                current_price = (quote.get("last_price") or t.entry_price) if quote else t.entry_price
                 
                 if t.side == "BUY":
                     pnl_pct = ((current_price - t.entry_price) / t.entry_price) * 100
