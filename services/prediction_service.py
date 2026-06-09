@@ -9,6 +9,17 @@ from services.validation_service import validation_service
 from services.political_monitor import political_monitor
 from services.news_scraper import news_scraper
 
+def count_trading_days(start_date: datetime, end_date: datetime) -> int:
+    """Count trading days (Mon-Fri) between start_date and end_date."""
+    days = 0
+    curr = start_date.date()
+    end = end_date.date()
+    while curr < end:
+        if curr.weekday() < 5:
+            days += 1
+        curr += timedelta(days=1)
+    return days
+
 def generate_thesis_from_citations(symbol: str, direction: str, citations: list) -> str:
     """Build a human-readable thesis string citing each catalyst."""
     try:
@@ -50,7 +61,8 @@ class PredictionService:
         timeframe_days: int = 7,
         target_price: Optional[float] = None,
         pattern_id: Optional[int] = None,
-        force: bool = False
+        force: bool = False,
+        prediction_tag: Optional[str] = None
     ) -> Dict:
         """
         Record a new market prediction with safety checks.
@@ -112,6 +124,8 @@ class PredictionService:
             tweets = political_monitor.get_recent_ticker_tweets(symbol, hours=24)
             news = news_scraper.get_recent_for_ticker(symbol, hours=24)
             
+            # We will compute the tag after citations are built in Step 5
+            
             # Step 5: Citation assembly & final confidence calculation
             logger.info(f"[Prediction] step 5 started for {symbol} (Citations and thesis assembly)")
             confidence_delta = 0.0
@@ -172,10 +186,20 @@ class PredictionService:
             else:
                 thesis = f"{direction} on {symbol} from TA composite only (no catalysts in 24h)"
             
+            # Compute tag if not overridden
+            if not prediction_tag:
+                if any(abs(c.get("weight", 0)) >= 0.10 for c in citations):
+                    prediction_tag = "CATALYST_DRIVEN"
+                elif citations:
+                    prediction_tag = "WEAK_CATALYST"
+                else:
+                    prediction_tag = "TA_ONLY"
+
             # Step 6: Database transaction (inserting the Prediction object)
             logger.info(f"[Prediction] step 6 started for {symbol} (Writing prediction to database)")
             prediction = Prediction(
                 symbol=symbol,
+                prediction_tag=prediction_tag,
                 direction=direction,
                 confidence=final_confidence,
                 confidence_score=auto_conf,
@@ -214,21 +238,42 @@ class PredictionService:
 
     def resolve_pending_predictions(self) -> List[Dict]:
         """
-        Check all pending predictions whose deadline has passed and resolve them.
+        Check all pending predictions, resolve those past their deadline,
+        and auto-expire those exceeding the 10-trading-day limit to NEUTRAL.
         """
         db = SessionLocal()
         resolved_list = []
         try:
             now = datetime.utcnow()
-            pending = db.query(Prediction).filter(
-                Prediction.outcome == None,
-                Prediction.deadline <= now
-            ).all()
+            pending = db.query(Prediction).filter(Prediction.outcome == None).all()
             
             for pred in pending:
-                result = self.resolve_prediction(pred.id)
-                if result.get("success"):
-                    resolved_list.append(result)
+                if not pred.created_at:
+                    logger.critical(f"[Prediction] Data integrity issue: Prediction #{pred.id} has no created_at. Treating as ancient (1970-01-01).")
+                    created_at = datetime(1970, 1, 1)
+                else:
+                    created_at = pred.created_at
+                trading_days = count_trading_days(created_at, now)
+                if trading_days >= 10:
+                    # Auto-expire to NEUTRAL
+                    pred.outcome = "NEUTRAL"
+                    pred.exit_price = pred.entry_price
+                    pred.actual_move_pct = 0.0
+                    pred.resolved_at = now
+                    pred.notes = f"Auto-expired to NEUTRAL after exceeding 10-trading-day maximum hold period (actual: {trading_days} trading days)."
+                    db.commit()
+                    logger.info(f"[Prediction] Auto-expired #{pred.id} to NEUTRAL after {trading_days} trading days.")
+                    resolved_list.append({
+                        "success": True,
+                        "id": pred.id,
+                        "symbol": pred.symbol,
+                        "outcome": "NEUTRAL",
+                        "move_pct": 0.0
+                    })
+                elif pred.deadline <= now:
+                    result = self.resolve_prediction(pred.id)
+                    if result.get("success"):
+                        resolved_list.append(result)
             
             return resolved_list
         except Exception as e:
@@ -249,6 +294,29 @@ class PredictionService:
             
             if prediction.outcome:
                 return {"success": False, "error": "Already resolved"}
+            
+            # Check for 10-trading-day auto-expire to NEUTRAL
+            if not prediction.created_at:
+                logger.critical(f"[Prediction] Data integrity issue: Prediction #{prediction.id} has no created_at. Treating as ancient (1970-01-01).")
+                created_at = datetime(1970, 1, 1)
+            else:
+                created_at = prediction.created_at
+            trading_days = count_trading_days(created_at, datetime.utcnow())
+            if trading_days >= 10:
+                prediction.outcome = "NEUTRAL"
+                prediction.exit_price = prediction.entry_price
+                prediction.actual_move_pct = 0.0
+                prediction.resolved_at = datetime.utcnow()
+                prediction.notes = f"Auto-expired to NEUTRAL after exceeding 10-trading-day maximum hold period (actual: {trading_days} trading days). {manual_notes}".strip()
+                db.commit()
+                logger.info(f"[Prediction] Auto-expired #{prediction.id} to NEUTRAL after {trading_days} trading days.")
+                return {
+                    "success": True,
+                    "id": prediction.id,
+                    "symbol": prediction.symbol,
+                    "outcome": "NEUTRAL",
+                    "move_pct": 0.0
+                }
 
             # Get current price
             price_data = moomoo_service.get_stock_quote(prediction.symbol)

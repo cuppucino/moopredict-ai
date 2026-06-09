@@ -561,7 +561,8 @@ def create_prediction(payload: dict):
             catalyst=catalyst,
             category=payload.get("category", "general"),
             timeframe_days=parsed_timeframe,
-            force=bool(payload.get("force", False))
+            force=bool(payload.get("force", False)),
+            prediction_tag=payload.get("prediction_tag")
         )
     except Exception as e:
         logger.error(f"Failed to create prediction due to service error: {e}")
@@ -1513,7 +1514,8 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                     confidence=confidence, 
                     catalyst=catalyst,
                     pattern_id=pattern_id,
-                    force=force
+                    force=force,
+                    prediction_tag=body.get("prediction_tag")
                 )
                 if res["success"]:
                     from services.signal_aggregator import signal_aggregator

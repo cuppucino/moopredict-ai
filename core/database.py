@@ -140,6 +140,7 @@ class Prediction(Base):
     __tablename__ = "predictions"
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String(20), nullable=False)
+    prediction_tag = Column(String(30), nullable=True)  # CATALYST_DRIVEN | TA_ONLY
     direction = Column(String(10), nullable=False)  # UP | DOWN | FLAT
     confidence = Column(Float, nullable=False)  # 0-100
     catalyst = Column(Text, nullable=False)

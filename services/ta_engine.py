@@ -76,8 +76,19 @@ class TAEngine:
             # 3b. Institutional Volume Flow (Volume Profile) - S-Tier
             try:
                 from services.volume_flow_service import vol_flow_service
-                vol_data = vol_flow_service.calculate_volume_profile(symbol, resolution="1w")
-                if vol_data.get("success"):
+                from concurrent.futures import ThreadPoolExecutor, TimeoutError
+                
+                executor = ThreadPoolExecutor(max_workers=1)
+                try:
+                    future = executor.submit(vol_flow_service.calculate_volume_profile, symbol, resolution="1w")
+                    vol_data = future.result(timeout=5.0)
+                except TimeoutError:
+                    logger.error(f"[TAEngine] Volume flow calculation timed out (5.0s limit) for {symbol}")
+                    vol_data = {"error": "ta_timeout"}
+                finally:
+                    executor.shutdown(wait=False)
+                
+                if vol_data and vol_data.get("success"):
                     poc_val = vol_data["poc"]
                     dist = vol_data["distance_to_poc_pct"]
                     shape = vol_data["shape"]

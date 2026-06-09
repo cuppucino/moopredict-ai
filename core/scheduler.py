@@ -18,6 +18,26 @@ from services.ml_service import ml_service
 from services.pattern_analyzer import pattern_analyzer
 from services.watchdog import watchdog_service
 
+def _run_job_with_timeout(func, timeout_sec: float = 30.0):
+    """Run a scheduler job in a non-blocking thread pool executor with a timeout."""
+    def wrapper(*args, **kwargs):
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(func, *args, **kwargs)
+            return future.result(timeout=timeout_sec)
+        except TimeoutError:
+            logger.error(f"[Scheduler] Job {func.__name__ if hasattr(func, '__name__') else str(func)} timed out after {timeout_sec}s")
+            return None
+        except Exception as e:
+            logger.error(f"[Scheduler] Job {func.__name__ if hasattr(func, '__name__') else str(func)} failed: {e}")
+            return None
+        finally:
+            executor.shutdown(wait=False)
+    if hasattr(func, '__name__'):
+        wrapper.__name__ = func.__name__
+    return wrapper
+
 class Scheduler:
     def __init__(self):
         # Force UTC to avoid local timezone offsets and configure misfire grace time to prevent skipped checks
@@ -62,10 +82,20 @@ class Scheduler:
 
         # Price Alerts (Every 5 minutes)
         from services.alert_service import alert_service
-        self.scheduler.add_job(alert_service.check_alerts, CronTrigger.from_crontab("*/5 * * * *", timezone=pytz.utc), id="price_alert_job")
+        self.scheduler.add_job(
+            _run_job_with_timeout(alert_service.check_alerts, 30.0),
+            CronTrigger.from_crontab("*/5 * * * *", timezone=pytz.utc),
+            id="price_alert_job",
+            max_instances=2
+        )
 
         # Trailing Stops (Every 5 minutes during market hours)
-        self.scheduler.add_job(trailing_stop_service.update_stops, CronTrigger.from_crontab("*/5 13-21 * * 1-5", timezone=pytz.utc), id="trailing_stop_job")
+        self.scheduler.add_job(
+            _run_job_with_timeout(trailing_stop_service.update_stops, 30.0),
+            CronTrigger.from_crontab("*/5 13-21 * * 1-5", timezone=pytz.utc),
+            id="trailing_stop_job",
+            max_instances=2
+        )
 
         # TA Snapshots (Every hour during market hours)
         from services.ta_engine import ta_engine
@@ -122,6 +152,45 @@ class Scheduler:
         # Prediction Auto-Resolve (Every 6 hours)
         from services.prediction_service import prediction_service
         self.scheduler.add_job(prediction_service.resolve_pending_predictions, CronTrigger.from_crontab("0 */6 * * *", timezone=pytz.utc), id="prediction_resolve_job")
+
+        # --- OpenClaw Autonomous Triggers ---
+        from services.openclaw_service import openclaw_service
+        
+        # 1. Premarket Sweep (12:00 UTC, Mon-Fri)
+        self.scheduler.add_job(
+            _run_job_with_timeout(lambda: openclaw_service.trigger_agent(
+                "premarket", 
+                "Perform the daily pre-market sweep and check news catalysts."
+            ), 180.0),
+            CronTrigger.from_crontab("0 12 * * 1-5", timezone=pytz.utc),
+            id="openclaw_premarket_sweep",
+            max_instances=2
+        )
+
+        # 2. Intra-day Decision/Monitor Cycle (Every 30 minutes, 13:00 to 20:30 UTC, Mon-Fri)
+        self.scheduler.add_job(
+            _run_job_with_timeout(lambda: openclaw_service.trigger_agent(
+                "decision",
+                "Check open predictions for target/stop hits and resolve any that crossed thresholds. "
+                "Do NOT create new predictions in this cycle — only the 12:00 UTC pre-market sweep creates new predictions. "
+                "If no resolutions needed, return silently."
+            ), 60.0),
+            CronTrigger.from_crontab("*/30 13-20 * * 1-5", timezone=pytz.utc),
+            id="openclaw_decision_cycle",
+            max_instances=2
+        )
+
+        # 3. Post-market Analysis (20:30 UTC, Mon-Fri)
+        self.scheduler.add_job(
+            _run_job_with_timeout(lambda: openclaw_service.trigger_agent(
+                "postmarket",
+                "Run post-market analysis and write daily trading lessons."
+            ), 120.0),
+            CronTrigger.from_crontab("30 20 * * 1-5", timezone=pytz.utc),
+            id="openclaw_postmarket_analysis",
+            max_instances=2
+        )
+
 
         # Weekly Outlook (Sunday 02:00 UTC = 10:00 AM MYT)
         from services.outlook_service import outlook_service
