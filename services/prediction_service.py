@@ -186,7 +186,11 @@ class PredictionService:
             else:
                 thesis = f"{direction} on {symbol} from TA composite only (no catalysts in 24h)"
             
-            # Compute tag if not overridden
+            # Compute tag if not overridden or if overridden with an invalid value
+            valid_tags = {"CATALYST_DRIVEN", "WEAK_CATALYST", "TA_ONLY", "INFERRED_CATALYST"}
+            if prediction_tag not in valid_tags:
+                prediction_tag = None
+
             if not prediction_tag:
                 if any(abs(c.get("weight", 0)) >= 0.10 for c in citations):
                     prediction_tag = "CATALYST_DRIVEN"

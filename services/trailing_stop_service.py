@@ -101,13 +101,14 @@ class TrailingStopService:
         logger.warning(f"[TrailingStop] TRIGGERED: {ts.symbol} @ {current_price} (Stop: {ts.stop_price}) - Reason: {reason}")
         
         # 1. Notify user
+        pnl_pct = ((current_price / ts.entry_price) - 1) * 100 if ts.entry_price > 0 else 0.0
         msg = (
             f"🚨 *TRAILING STOP TRIGGERED: {ts.symbol}*\n"
             f"──────────────────\n"
             f"Exit Price: ${current_price:.2f}\n"
             f"Stop Level: ${ts.stop_price:.2f}\n"
             f"Reason: {reason}\n"
-            f"P&L: {((current_price/ts.entry_price)-1)*100:.2f}%"
+            f"P&L: {pnl_pct:+.2f}%"
         )
         notification_queue.enqueue(msg, level="alert", category="news")
         

@@ -194,9 +194,11 @@ class MoomooService:
                 return result
             else:
                 logger.error(f"Balance query failed: {data}")
+                self.is_connected = False
                 return None
         except Exception as e:
             logger.error(f"Error fetching balance: {e}")
+            self.is_connected = False
             return None
 
     def get_positions(self) -> List[Dict]:
@@ -228,9 +230,11 @@ class MoomooService:
                 return positions
             else:
                 logger.error(f"Position query failed: {data}")
+                self.is_connected = False
                 return []
         except Exception as e:
             logger.error(f"Error fetching positions: {e}")
+            self.is_connected = False
             return []
 
     def place_order(self, symbol: str, qty: float, side: str, order_type: str = "MARKET", price: float = 0.0) -> Dict:
@@ -381,8 +385,11 @@ class MoomooService:
                         "timestamp": datetime.now().isoformat(),
                         "source": "moomoo"
                     }
+                else:
+                    self.is_connected = False
             except Exception as e:
                 logger.error(f"[Moomoo] Quote exception for {symbol}: {e}")
+                self.is_connected = False
 
         # Tier 4: yfinance fallback (delayed but better than nothing)
         def _fetch_yfinance():
@@ -543,6 +550,7 @@ class MoomooService:
             self.trd_ctx.close()
         if self.quote_ctx:
             self.quote_ctx.close()
+        self.is_connected = False
         logger.info("Moomoo connections closed.")
 
 # Singleton instance
