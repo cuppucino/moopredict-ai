@@ -5,7 +5,7 @@ from loguru import logger
 # Add project root to path so we can import services
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../")))
 
-from services.market_research import research_service
+from services._legacy.market_research import research_service
 
 def main():
     if len(sys.argv) < 2:

@@ -1,7 +1,7 @@
 import os
 from loguru import logger
 from typing import Dict, List, Optional
-from services.options_engine import options_engine
+from services._legacy.options_engine import options_engine
 
 class UOAService:
     def detect_gamma_squeeze(self, symbol: str) -> Dict:

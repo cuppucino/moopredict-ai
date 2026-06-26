@@ -4,7 +4,7 @@ from core.database import SessionLocal, NewsIntel, SocialPost
 from services.moomoo_service import moomoo_service
 from services.technical_analysis import ta_service
 from services.earnings_calendar import earnings_service
-from services.options_flow import options_service
+from services._legacy.options_flow import options_service
 from services.ai_service import ai_service
 
 class MarketResearchService:

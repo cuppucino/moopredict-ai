@@ -2,7 +2,7 @@ from typing import Dict, List
 from loguru import logger
 from services.ta_engine import ta_engine
 from services.sentiment_engine import sentiment_engine
-from services.options_engine import options_engine
+from services._legacy.options_engine import options_engine
 from services.volume_flow_service import vol_flow_service
 from services.sector_analysis import sector_service
 from services.political_monitor import political_monitor
@@ -37,7 +37,7 @@ class SignalAggregator:
             # 3. Insider Activity (SEC Filings)
             insider_score = 0
             try:
-                from services.sec_filing_service import sec_service
+                from services._legacy.sec_filing_service import sec_service
                 insider = sec_service.get_insider_activity(symbol)
                 if "BULLISH" in insider["sentiment"]:
                     insider_score = 25

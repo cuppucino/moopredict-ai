@@ -5,7 +5,7 @@ import yfinance as yf
 from services.earnings_calendar import earnings_service
 from services.sentiment_service import sentiment_service
 from services.technical_analysis import ta_service
-from services.options_flow import options_service
+from services._legacy.options_flow import options_service
 
 class ValidationService:
     def is_earnings_blocked(self, symbol: str) -> Tuple[bool, str]:
@@ -99,7 +99,7 @@ class ValidationService:
                     warnings.append(f"⚠️ RANGE BOUND: Market is sideways. Directional bets are lower probability.")
             
             # 4. Options Flow (Smart Money)
-            from services.options_engine import options_engine
+            from services._legacy.options_engine import options_engine
             options = options_engine.get_chain_data(symbol)
             if options:
                 pcr = options["pcr"]
@@ -123,7 +123,7 @@ class ValidationService:
 
             # 5. Insider Activity Check (SMCI fix)
             try:
-                from services.sec_filing_service import sec_service
+                from services._legacy.sec_filing_service import sec_service
                 insider = sec_service.get_insider_activity(symbol)
                 if insider["sentiment"] == "BEARISH (Insider Selling)" and direction == "UP":
                     warnings.append(f"🔴 INSIDER CONFLICT: Heavy insider selling detected ({insider['sells']} sells).")

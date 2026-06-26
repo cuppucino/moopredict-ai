@@ -3,7 +3,7 @@ import json
 import time
 from loguru import logger
 from typing import Dict, List, Optional
-from services.pattern_service import pattern_service
+from services._legacy.pattern_service import pattern_service
 
 class AIService:
     def __init__(self, model: str = "llama3.2:1b", base_url: str = "http://localhost:11434"):

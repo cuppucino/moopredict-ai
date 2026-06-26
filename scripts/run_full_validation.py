@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import yfinance as yf
 from core.database import SessionLocal, MCPTResult
-from services.mcpt.validator import run_insample_mcpt, run_walkforward_mcpt
+from services._legacy.mcpt.validator import run_insample_mcpt, run_walkforward_mcpt
 
 # Production fidelity
 MCPT_PERMS_IS = int(os.getenv("MCPT_PERMS_IS", "1000"))
@@ -37,7 +37,7 @@ else:
 
 def update_mcpt_status(session, strategy, ticker, insample_p, wf_p, real_pf):
     """Apply gating rules and store result."""
-    from services.mcpt_nightly import update_mcpt_status as _update
+    from services._legacy.mcpt_nightly import update_mcpt_status as _update
     return _update(session, strategy, ticker, insample_p, wf_p, real_pf)
 
 

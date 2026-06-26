@@ -4,16 +4,16 @@ from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 from loguru import logger
 
-from services.mcpt.bar_permute import get_permutation
-from services.mcpt.optimizer import optimize_rsi, optimize_vwap, optimize_reversal, optimize_volume_profile
-from services.mcpt.profit_factor import compute_pf
-from services.mcpt.adapters.rsi_adapter import rsi_signal
-from services.mcpt.adapters.vwap_adapter import vwap_mean_reversion_signal
-from services.mcpt.adapters.reversal_adapter import reversal_signal
-from services.mcpt.adapters.volume_profile_adapter import volume_profile_signal
-from services.mcpt.adapters.signal_aggregator_adapter import signal_aggregator_signal
-from services.mcpt.walkforward import walkforward_aggregator_signal, compute_net_returns, compute_pf_from_returns
-from services.mcpt.costs import PER_FLIP_BPS
+from services._legacy.mcpt.bar_permute import get_permutation
+from services._legacy.mcpt.optimizer import optimize_rsi, optimize_vwap, optimize_reversal, optimize_volume_profile
+from services._legacy.mcpt.profit_factor import compute_pf
+from services._legacy.mcpt.adapters.rsi_adapter import rsi_signal
+from services._legacy.mcpt.adapters.vwap_adapter import vwap_mean_reversion_signal
+from services._legacy.mcpt.adapters.reversal_adapter import reversal_signal
+from services._legacy.mcpt.adapters.volume_profile_adapter import volume_profile_signal
+from services._legacy.mcpt.adapters.signal_aggregator_adapter import signal_aggregator_signal
+from services._legacy.mcpt.walkforward import walkforward_aggregator_signal, compute_net_returns, compute_pf_from_returns
+from services._legacy.mcpt.costs import PER_FLIP_BPS
 
 def count_signal_flips(signal: pd.Series) -> int:
     return int((signal.diff().fillna(0) != 0).sum())

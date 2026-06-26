@@ -183,7 +183,7 @@ def run_nightly_job():
     Main execution wrapper for the nightly MCPT job, checking trading-day constraints,
     loading fresh daily data via yfinance, and executing in-sample and walk-forward MCPT validations.
     """
-    from services.mcpt.validator import run_insample_mcpt, run_walkforward_mcpt
+    from services._legacy.mcpt.validator import run_insample_mcpt, run_walkforward_mcpt
     import yfinance as yf
     
     try:

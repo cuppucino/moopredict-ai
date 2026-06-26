@@ -2,11 +2,11 @@ import pandas as pd
 import numpy as np
 from typing import Tuple, Dict
 
-from services.mcpt.profit_factor import compute_pf
-from services.mcpt.adapters.rsi_adapter import rsi_signal
-from services.mcpt.adapters.vwap_adapter import vwap_mean_reversion_signal
-from services.mcpt.adapters.reversal_adapter import reversal_signal
-from services.mcpt.adapters.volume_profile_adapter import volume_profile_signal
+from services._legacy.mcpt.profit_factor import compute_pf
+from services._legacy.mcpt.adapters.rsi_adapter import rsi_signal
+from services._legacy.mcpt.adapters.vwap_adapter import vwap_mean_reversion_signal
+from services._legacy.mcpt.adapters.reversal_adapter import reversal_signal
+from services._legacy.mcpt.adapters.volume_profile_adapter import volume_profile_signal
 
 def optimize_rsi(ohlc: pd.DataFrame, min_trades: int = 50) -> Tuple[Dict, float]:
     """

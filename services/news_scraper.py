@@ -57,7 +57,7 @@ class NewsScraper:
                 summary = ai_service.summarize_content("News", new_headlines)
                 
                 # Cross-reference with confirmed patterns
-                from services.pattern_service import pattern_service
+                from services._legacy.pattern_service import pattern_service
                 patterns = pattern_service.get_all(limit=10)
                 matched_rules = []
                 for p in patterns:

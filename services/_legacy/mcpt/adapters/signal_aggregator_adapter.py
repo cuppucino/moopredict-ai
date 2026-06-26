@@ -2,10 +2,10 @@ import pandas as pd
 import numpy as np
 from loguru import logger
 
-from services.mcpt.adapters.rsi_adapter import rsi_signal
-from services.mcpt.adapters.vwap_adapter import vwap_mean_reversion_signal
-from services.mcpt.adapters.reversal_adapter import reversal_signal
-from services.mcpt.adapters.volume_profile_adapter import volume_profile_signal
+from services._legacy.mcpt.adapters.rsi_adapter import rsi_signal
+from services._legacy.mcpt.adapters.vwap_adapter import vwap_mean_reversion_signal
+from services._legacy.mcpt.adapters.reversal_adapter import reversal_signal
+from services._legacy.mcpt.adapters.volume_profile_adapter import volume_profile_signal
 
 # Optimal parameters found during standalone optimizations
 TICKER_BASE_PARAMS = {

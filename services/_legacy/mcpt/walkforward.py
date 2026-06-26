@@ -5,13 +5,13 @@ import numpy as np
 from loguru import logger
 from typing import Tuple, Dict, Any
 
-from services.mcpt.optimizer import optimize_rsi, optimize_vwap, optimize_reversal, optimize_volume_profile
-from services.mcpt.profit_factor import compute_pf
-from services.mcpt.adapters.rsi_adapter import rsi_signal
-from services.mcpt.adapters.vwap_adapter import vwap_mean_reversion_signal
-from services.mcpt.adapters.reversal_adapter import reversal_signal
-from services.mcpt.adapters.volume_profile_adapter import volume_profile_signal
-from services.mcpt.costs import PER_FLIP_BPS
+from services._legacy.mcpt.optimizer import optimize_rsi, optimize_vwap, optimize_reversal, optimize_volume_profile
+from services._legacy.mcpt.profit_factor import compute_pf
+from services._legacy.mcpt.adapters.rsi_adapter import rsi_signal
+from services._legacy.mcpt.adapters.vwap_adapter import vwap_mean_reversion_signal
+from services._legacy.mcpt.adapters.reversal_adapter import reversal_signal
+from services._legacy.mcpt.adapters.volume_profile_adapter import volume_profile_signal
+from services._legacy.mcpt.costs import PER_FLIP_BPS
 
 def compute_net_returns(signal: pd.Series, returns: pd.Series, bps_cost: float = PER_FLIP_BPS) -> pd.Series:
     """
@@ -71,7 +71,7 @@ def walkforward_aggregator_signal(
       (oos_signal_series, weights_history, params_history)
     """
     # Import run_insample_mcpt locally to avoid circular dependency
-    from services.mcpt.validator import run_insample_mcpt
+    from services._legacy.mcpt.validator import run_insample_mcpt
 
     n_bars = len(ohlc)
     oos_signal = pd.Series(0, index=ohlc.index)

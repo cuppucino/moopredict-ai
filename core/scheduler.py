@@ -8,14 +8,14 @@ from services.x_scraper import x_scraper
 from services.reddit_scraper import reddit_scraper
 from services.daily_briefing import briefing_service
 from services.notifications import notification_queue
-from services.options_flow import options_service
+from services._legacy.options_flow import options_service
 from services.trailing_stop_service import trailing_stop_service
 from services.strategy_service import strategy_service
 from core.database import SessionLocal, UserWatchlist
 from services.heartbeat_monitor import heartbeat_monitor
 from services.macro_calendar_service import macro_service
-from services.ml_service import ml_service
-from services.pattern_analyzer import pattern_analyzer
+from services._legacy.ml_service import ml_service
+from services._legacy.pattern_analyzer import pattern_analyzer
 from services.watchdog import watchdog_service
 
 def _run_job_with_timeout(func, timeout_sec: float = 30.0):
@@ -124,7 +124,7 @@ class Scheduler:
         self.scheduler.add_job(sentiment_snapshot_job, CronTrigger.from_crontab("0 13-21 * * 1-5", timezone=pytz.utc), id="sentiment_snapshot_job")
 
         # Options Snapshots (Every 4 hours during market hours - options data is heavy)
-        from services.options_engine import options_engine
+        from services._legacy.options_engine import options_engine
         def options_snapshot_job():
             db = SessionLocal()
             try:
@@ -193,7 +193,7 @@ class Scheduler:
 
 
         # Weekly Outlook (Sunday 02:00 UTC = 10:00 AM MYT)
-        from services.outlook_service import outlook_service
+        from services._legacy.outlook_service import outlook_service
         self.scheduler.add_job(outlook_service.generate_weekly_outlook, CronTrigger.from_crontab("0 2 * * 0", timezone=pytz.utc), id="weekly_outlook_job")
 
         # Strategy Evolution (Sunday 03:00 UTC = 11:00 AM MYT)
