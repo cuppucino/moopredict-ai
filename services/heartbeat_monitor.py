@@ -30,21 +30,32 @@ class HeartbeatMonitor:
 
     def _load_state(self):
         """Load heartbeat state from JSON file."""
-        if os.path.exists(self.state_path):
-            try:
-                with open(self.state_path, "r") as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"[Heartbeat] Failed to load state: {e}")
-        
-        # Default state
-        return {
+        state = {
             "last_check_utc": None,
             "alerts": {},  # { "type:id": timestamp }
             "positions": {}, # { "symbol": last_price }
             "sectors": {},   # { "symbol": last_quadrant }
-            "health": {"opend_connected": True}
+            "health": {
+                "opend_connected": True,
+                "consecutive_connection_failures": 0
+            }
         }
+        if os.path.exists(self.state_path):
+            try:
+                with open(self.state_path, "r") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        state.update(loaded)
+            except Exception as e:
+                logger.error(f"[Heartbeat] Failed to load state: {e}")
+        
+        # Ensure nested health structure exists
+        if "health" not in state or not isinstance(state["health"], dict):
+            state["health"] = {"opend_connected": True, "consecutive_connection_failures": 0}
+        if "consecutive_connection_failures" not in state["health"]:
+            state["health"]["consecutive_connection_failures"] = 0
+            
+        return state
 
     def _save_state(self):
         """Save heartbeat state to JSON file."""
@@ -229,7 +240,7 @@ class HeartbeatMonitor:
         
         if stale_sources:
             msg = f"⚠️ *DATA STALENESS WARNING*\nThe following sources are > {stale_threshold} min old:\n" + "\n".join([f"• {s}" for s in stale_sources])
-            notification_queue.enqueue(msg, level="warning", category="system")
+            notification_queue.enqueue(msg, level="warning", category="stale_data")
             logger.warning(f"[Heartbeat] Stale data detected: {stale_sources}")
 
     def _send_dead_heartbeat_alert(self, message: str):
@@ -275,10 +286,41 @@ class HeartbeatMonitor:
     def run_full_check(self):
         """Perform all monitoring checks and persist state with auto-reconnect logic."""
         # 1. Resilient Connection
-        if not moomoo_service.is_connected:
+        is_conn = moomoo_service.is_connected
+        
+        # Ensure health state is initialized
+        if "health" not in self.state:
+            self.state["health"] = {}
+        if "consecutive_connection_failures" not in self.state["health"]:
+            self.state["health"]["consecutive_connection_failures"] = 0
+            
+        if not is_conn:
             logger.warning("[Heartbeat] OpenD disconnected. Attempting auto-reconnect...")
-            if not moomoo_service.auto_reconnect():
-                self._send_dead_heartbeat_alert("OpenD is DOWN and auto-reconnect failed. Monitoring is impaired.")
+            reconnect_success = False
+            try:
+                reconnect_success = moomoo_service.auto_reconnect()
+            except Exception as e:
+                logger.error(f"[Heartbeat] Error during auto-reconnect: {e}")
+                reconnect_success = False
+                
+            if not reconnect_success:
+                self.state["health"]["consecutive_connection_failures"] += 1
+                self._save_state()
+                fail_count = self.state["health"]["consecutive_connection_failures"]
+                
+                if fail_count >= 3:
+                    msg = f"OpenD is DOWN and auto-reconnect failed consecutively ({fail_count} failures). Monitoring is impaired."
+                    notification_queue.enqueue(msg, level="alert", category="system_error")
+                    self._send_dead_heartbeat_alert(msg)
+                else:
+                    msg = f"OpenD is DOWN and auto-reconnect failed (attempt {fail_count}/3). Reconnect will be retried."
+                    notification_queue.enqueue(msg, level="warning", category="heartbeat_warning")
+            else:
+                self.state["health"]["consecutive_connection_failures"] = 0
+                self._save_state()
+        else:
+            self.state["health"]["consecutive_connection_failures"] = 0
+            self._save_state()
         
         # 2. Monitoring Tasks (Run with timeout to prevent blocking)
         from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError

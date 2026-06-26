@@ -20,24 +20,23 @@ from services.technical_analysis import ta_service
 from services.earnings_calendar import earnings_service
 from services.sector_analysis import sector_service
 from services.daily_briefing import briefing_service
-from services.options_flow import options_service
+from services._legacy.options_flow import options_service
 from services.trailing_stop_service import trailing_stop_service
-from services.treasurer_service import treasurer_service
+from services._legacy.treasurer_service import treasurer_service
 from services.strategy_service import strategy_service
-from services.market_research import research_service
+from services._legacy.market_research import research_service
 from services.trade_journal import trade_journal
-from services.pattern_service import pattern_service
+from services._legacy.pattern_service import pattern_service
 from services.alert_service import alert_service
 from services.risk_service import risk_service
 from services.prediction_service import prediction_service
-from services.outlook_service import outlook_service
+from services._legacy.outlook_service import outlook_service
 from services.validation_service import validation_service
 from services.sentiment_service import sentiment_service
-from services.pattern_stats import pattern_stats_service
+from services._legacy.pattern_stats import pattern_stats_service
 from services.volume_flow_service import vol_flow_service
 from services.heartbeat_monitor import heartbeat_monitor
 from services.paper_trading import paper_trading_service
-from market_movers_endpoint import get_market_movers
 
 from contextlib import asynccontextmanager
 
@@ -260,7 +259,7 @@ def get_sentiment_breakdown(symbol: str):
 @app.get("/api/options/analysis/{symbol}")
 def get_options_analysis(symbol: str):
     """Fetch detailed options metrics (Max Pain, GEX)."""
-    from services.options_engine import options_engine
+    from services._legacy.options_engine import options_engine
     return options_engine.get_chain_data(symbol)
 
 @app.get("/api/risk/var/{symbol}")
@@ -295,26 +294,26 @@ def get_smart_size(symbol: str, price: float = None):
 @app.get("/api/backtest/rsi/{symbol}")
 def get_backtest_rsi(symbol: str, lookback: int = 365):
     """Backtest RSI strategy."""
-    from services.backtest_engine import backtest_engine
+    from services._legacy.backtest_engine import backtest_engine
     return backtest_engine.backtest_rsi(symbol, lookback_days=lookback)
 
 
 @app.get("/api/backtest/ema/{symbol}")
 def get_backtest_ema(symbol: str, lookback: int = 365):
     """Backtest EMA crossover strategy."""
-    from services.backtest_engine import backtest_engine
+    from services._legacy.backtest_engine import backtest_engine
     return backtest_engine.backtest_ema_crossover(symbol, lookback_days=lookback)
 
 @app.get("/api/ml/forecast/{symbol}")
 def get_ml_forecast(symbol: str):
     """LSTM Price Forecast."""
-    from services.ml_engine import ml_engine
+    from services._legacy.ml_engine import ml_engine
     return ml_engine.predict_price_lstm(symbol)
 
 @app.get("/api/ml/trend/{symbol}")
 def get_ml_trend(symbol: str):
     """Trend Prediction (Random Forest)."""
-    from services.ml_engine import ml_engine
+    from services._legacy.ml_engine import ml_engine
     return ml_engine.predict_trend_random_forest(symbol)
 
 @app.get("/api/earnings/{symbol}")
@@ -349,11 +348,6 @@ def get_briefing(quick: bool = False):
     """Fetch structured market and portfolio briefing."""
     return briefing_service.get_briefing_data(quick=quick)
 
-@app.get("/api/market/movers")
-async def market_movers(limit: int = 10):
-    """Fetch top gainers, losers, and most active stocks."""
-    return await get_market_movers(limit)
-
 @app.get("/api/options/{symbol}")
 def get_options_flow(symbol: str):
     """Fetch unusual options activity."""
@@ -387,19 +381,19 @@ def get_position_size(symbol: str, price: float, risk: float = 2.0):
 @app.get("/api/darkpool/{symbol}")
 def get_darkpool_data(symbol: str):
     """Fetch institutional dark pool prints."""
-    from services.darkpool_service import darkpool_service
+    from services._legacy.darkpool_service import darkpool_service
     return darkpool_service.get_summary(symbol)
 
 @app.get("/api/uoa/{symbol}")
 def get_uoa_flow(symbol: str):
     """Fetch Unusual Options Activity (UOA) alerts."""
-    from services.uoa_service import uoa_service
+    from services._legacy.uoa_service import uoa_service
     return uoa_service.get_summary(symbol)
 
 @app.get("/api/sec/{symbol}")
 def get_sec_filings(symbol: str):
     """Fetch insider trades and institutional filings."""
-    from services.sec_filing_service import sec_service
+    from services._legacy.sec_filing_service import sec_service
     return sec_service.get_summary(symbol)
 
 @app.get("/api/vol/{symbol}")
@@ -532,10 +526,10 @@ def send_push_notification(payload: dict):
 
 # ─── Predictions ─────────────────────────────────────────────────────────────
 @app.get("/api/predictions")
-def get_predictions(active: bool = True):
+def get_predictions(active: bool = True, limit: int = 50, resolved_only: bool = False):
     if active:
         return prediction_service.get_active()
-    return []
+    return prediction_service.get_all(limit=limit, resolved_only=resolved_only)
 
 @app.post("/api/predictions")
 def create_prediction(payload: dict):
@@ -554,6 +548,13 @@ def create_prediction(payload: dict):
         raise HTTPException(status_code=400, detail="Invalid confidence or timeframe parameter.")
 
     try:
+        target_price = payload.get("target_price")
+        if target_price is not None:
+            try:
+                target_price = float(target_price)
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=400, detail="Invalid target_price.")
+
         res = prediction_service.create_prediction(
             symbol=symbol,
             direction=direction,
@@ -561,6 +562,7 @@ def create_prediction(payload: dict):
             catalyst=catalyst,
             category=payload.get("category", "general"),
             timeframe_days=parsed_timeframe,
+            target_price=target_price,
             force=bool(payload.get("force", False)),
             prediction_tag=payload.get("prediction_tag")
         )
@@ -584,6 +586,33 @@ def create_prediction(payload: dict):
             )
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to create prediction."))
     return res
+
+@app.post("/api/predictions/{prediction_id}/cancel")
+def cancel_prediction(prediction_id: int, payload: dict = None):
+    """
+    Cancel a pending prediction. Marks outcome as CANCELLED so it's
+    excluded from track-record metrics (only RIGHT/WRONG count).
+    Use for duplicates, fat-fingers, or pre-audit posts being replaced.
+    """
+    from datetime import datetime
+    from core.database import SessionLocal, Prediction
+    db = SessionLocal()
+    try:
+        p = db.query(Prediction).filter(Prediction.id == prediction_id).first()
+        if not p:
+            raise HTTPException(status_code=404, detail=f"Prediction #{prediction_id} not found")
+        if p.outcome is not None:
+            raise HTTPException(status_code=400, detail=f"Prediction #{prediction_id} already resolved as {p.outcome}")
+        reason = (payload or {}).get("reason", "manual cancel")
+        p.outcome = "CANCELLED"
+        p.exit_price = p.entry_price
+        p.actual_move_pct = 0.0
+        p.resolved_at = datetime.utcnow()
+        p.notes = f"CANCELLED: {reason}"
+        db.commit()
+        return {"success": True, "id": p.id, "symbol": p.symbol, "outcome": "CANCELLED", "reason": reason}
+    finally:
+        db.close()
 
 @app.get("/api/predictions/stats")
 def get_prediction_stats():
@@ -895,7 +924,7 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
 
         if command == "options" and len(parts) > 1:
             symbol = parts[1].upper()
-            from services.options_engine import options_engine
+            from services._legacy.options_engine import options_engine
             res = options_engine.get_chain_data(symbol)
             if not res: return {"content": f"❌ Error: Could not fetch options for {symbol}"}
             
@@ -983,7 +1012,7 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
         if command == "backtest" and len(parts) > 1:
             symbol = parts[1].upper()
             strategy = parts[2].lower() if len(parts) > 2 else "rsi"
-            from services.backtest_engine import backtest_engine
+            from services._legacy.backtest_engine import backtest_engine
             
             if strategy == "rsi":
                 res = backtest_engine.backtest_rsi(symbol)
@@ -1013,7 +1042,7 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
 
         if command == "forecast" and len(parts) > 1:
             symbol = parts[1].upper()
-            from services.ml_engine import ml_engine
+            from services._legacy.ml_engine import ml_engine
             res = ml_engine.predict_price_lstm(symbol)
             if "error" in res: return {"content": f"❌ ML Error: {res['error']}"}
             
@@ -1032,7 +1061,7 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
 
         if command == "trend" and len(parts) > 1:
             symbol = parts[1].upper()
-            from services.ml_engine import ml_engine
+            from services._legacy.ml_engine import ml_engine
             res = ml_engine.predict_trend_random_forest(symbol)
             if "error" in res: return {"content": f"❌ ML Error: {res['error']}"}
             
@@ -1147,7 +1176,7 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
 
         if command == "darkpool" and len(parts) > 1:
             symbol = parts[1].upper()
-            from services.darkpool_service import darkpool_service
+            from services._legacy.darkpool_service import darkpool_service
             res = darkpool_service.get_summary(symbol)
             if res.get("status") == "NOT_CONFIGURED":
                 return {"content": f"🐳 *Institutional Dark Pool: {symbol}*\n──────────────────\n{res['message']}"}
@@ -1155,7 +1184,7 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
 
         if command == "uoa" and len(parts) > 1:
             symbol = parts[1].upper()
-            from services.uoa_service import uoa_service
+            from services._legacy.uoa_service import uoa_service
             res = uoa_service.get_summary(symbol)
             if res.get("status") == "NOT_CONFIGURED":
                 return {"content": f"🐙 *Options Flow (UOA): {symbol}*\n──────────────────\n{res['message']}"}
@@ -1163,7 +1192,7 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
 
         if command in ["sec", "insider"] and len(parts) > 1:
             symbol = parts[1].upper()
-            from services.sec_filing_service import sec_service
+            from services._legacy.sec_filing_service import sec_service
             res = sec_service.get_summary(symbol)
             if res.get("status") == "NOT_CONFIGURED":
                 return {"content": f"🏛️ *SEC Insider Tracking: {symbol}*\n──────────────────\n{res['message']}"}

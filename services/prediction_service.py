@@ -180,11 +180,14 @@ class PredictionService:
             # Apply bounds
             final_confidence = max(20.0, min(95.0, confidence + confidence_delta))
             
-            # Build cited thesis
+            # Build cited thesis. Preserve user-provided catalyst as the lead line;
+            # auto-generated citation lines follow underneath.
+            user_catalyst = (catalyst or "").strip()
             if citations:
-                thesis = generate_thesis_from_citations(symbol, direction, citations)
+                auto = generate_thesis_from_citations(symbol, direction, citations)
+                thesis = f"{user_catalyst}\n\n{auto}" if user_catalyst else auto
             else:
-                thesis = f"{direction} on {symbol} from TA composite only (no catalysts in 24h)"
+                thesis = user_catalyst or f"{direction} on {symbol} from TA composite only (no catalysts in 24h)"
             
             # Compute tag if not overridden or if overridden with an invalid value
             valid_tags = {"CATALYST_DRIVEN", "WEAK_CATALYST", "TA_ONLY", "INFERRED_CATALYST"}
@@ -413,6 +416,36 @@ class PredictionService:
                     "confidence": p.confidence,
                     "deadline": p.deadline.isoformat(),
                     "catalyst": p.catalyst,
+                    "thesis_citations": p.thesis_citations or []
+                } for p in preds
+            ]
+        finally:
+            db.close()
+
+    def get_all(self, limit: int = 50, resolved_only: bool = False) -> List[Dict]:
+        db = SessionLocal()
+        try:
+            q = db.query(Prediction)
+            if resolved_only:
+                q = q.filter(Prediction.outcome.in_(["RIGHT", "WRONG"]))
+            preds = q.order_by(Prediction.id.desc()).limit(limit).all()
+            return [
+                {
+                    "id": p.id,
+                    "symbol": p.symbol,
+                    "direction": p.direction,
+                    "confidence": p.confidence,
+                    "catalyst": p.catalyst,
+                    "category": p.category,
+                    "prediction_tag": p.prediction_tag,
+                    "outcome": p.outcome,
+                    "entry_price": p.entry_price,
+                    "target_price": p.target_price,
+                    "exit_price": p.exit_price,
+                    "actual_move_pct": p.actual_move_pct,
+                    "created_at": p.created_at.isoformat() if p.created_at else None,
+                    "deadline": p.deadline.isoformat() if p.deadline else None,
+                    "resolved_at": p.resolved_at.isoformat() if p.resolved_at else None,
                     "thesis_citations": p.thesis_citations or []
                 } for p in preds
             ]

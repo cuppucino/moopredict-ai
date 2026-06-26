@@ -187,6 +187,40 @@ def get_tier(handle: str) -> str:
         return "UNKNOWN"
 
 TICKER_ALIASES = {
+    # ─── ETF UNIVERSE (primary focus as of 2026-06-26) ────────────────────────
+    # Broad index ETFs
+    "SPY":   ["S&P 500", "SPX", "S and P 500", "broad market", "US stocks"],
+    "QQQ":   ["Nasdaq 100", "Nasdaq", "tech-heavy index", "QQQs"],
+    "DIA":   ["Dow Jones", "Dow 30", "blue chips"],
+    "IWM":   ["Russell 2000", "small caps", "small-cap"],
+    # Sector ETFs (SPDR family)
+    "XLK":   ["tech sector", "technology sector", "tech ETF"],
+    "XLE":   ["energy sector", "oil and gas sector", "energy ETF"],
+    "XLF":   ["financial sector", "banks ETF", "financials"],
+    "XLV":   ["healthcare sector", "health ETF"],
+    "XLI":   ["industrials sector", "industrial ETF"],
+    "XLP":   ["consumer staples", "staples ETF"],
+    "XLY":   ["consumer discretionary", "discretionary ETF"],
+    "XLU":   ["utilities sector", "utilities ETF"],
+    "XLB":   ["materials sector", "materials ETF"],
+    "XLRE":  ["real estate sector", "REIT ETF"],
+    "XLC":   ["communications sector", "communication services"],
+    # Thematic / semiconductor ETFs
+    "SOXX":  ["semiconductor ETF", "chip ETF", "semis"],
+    "SMH":   ["semiconductor ETF", "VanEck Semi", "chip ETF"],
+    "XBI":   ["biotech ETF", "biotechnology sector"],
+    "DRAM":  ["memory chip ETF", "DRAM ETF", "Roundhill Memory"],
+    "ARKK":  ["ARK Innovation", "Cathie Wood ETF", "disruptive innovation"],
+    # Leveraged ETFs (deferred — high risk)
+    "TQQQ":  ["3x Nasdaq", "leveraged QQQ"],
+    "SQQQ":  ["inverse Nasdaq", "short QQQ"],
+    "SOXL":  ["3x semis", "leveraged semis"],
+    "SOXS":  ["inverse semis"],
+    # Commodity ETFs
+    "GLD":   ["gold ETF", "physical gold"],
+    "SLV":   ["silver ETF"],
+    "USO":   ["oil ETF", "crude oil ETF"],
+    # ─── INDIVIDUAL STOCKS (legacy — kept for backfilling history, no new picks) ──
     "GOOGL": ["Google", "Alphabet", "Gemma", "Bard", "Pichai", "Pixel", "YouTube", "DeepMind"],
     "GOOG":  ["Google", "Alphabet", "Gemma", "Bard", "Pichai", "Pixel", "YouTube", "DeepMind"],
     "NVDA":  ["Nvidia", "Jensen", "Huang", "CUDA", "Blackwell", "Hopper", "RTX"],
@@ -197,8 +231,15 @@ TICKER_ALIASES = {
     "AMZN":  ["Amazon", "AWS", "Bezos", "Andy Jassy"],
     "MARA":  ["Marathon Digital", "Marathon"],
     "CVX":   ["Chevron"],
-    "SPY":   ["S&P 500", "SPX"],
-    "QQQ":   ["Nasdaq 100", "QQQ"],
+    "INTC":  ["Intel", "Pat Gelsinger", "Lip-Bu Tan", "18A", "Foundry"],
+    "MRVL":  ["Marvell"],
+    "AMD":   ["AMD", "Advanced Micro Devices", "Lisa Su", "Ryzen", "Radeon"],
+    "NOK":   ["Nokia"],
+    "SMCI":  ["Super Micro", "Supermicro"],
+    "UEC":   ["Uranium Energy"],
+    "ROKU":  ["Roku"],
+    "DELL":  ["Dell"],
+    "URA":   ["Uranium ETF"],
 }
 
 def matches_ticker(text: str, ticker: str) -> bool:
