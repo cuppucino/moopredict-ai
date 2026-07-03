@@ -47,10 +47,12 @@ if __name__ == "__main__":
     
     # Run once at startup
     run_resolution()
-    
-    # Schedule to run every 12 hours
-    schedule.every(12).hours.do(run_resolution)
-    
+
+    # Schedule to run every 15 minutes. Previously every 12 hours which
+    # meant daily-cadence predictions could sit unresolved for hours past
+    # their deadline. 15 min caps resolution latency for any timeframe.
+    schedule.every(15).minutes.do(run_resolution)
+
     while True:
         schedule.run_pending()
         time.sleep(60)

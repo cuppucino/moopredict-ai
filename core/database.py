@@ -12,7 +12,14 @@ load_dotenv()
 raw_url = os.getenv("DATABASE_URL", "postgresql://admin:password@localhost:5432/moopredict")
 db_url = raw_url.replace("localhost", "host.docker.internal") if os.path.exists("/.dockerenv") else raw_url
 
-engine = create_engine(db_url)
+engine = create_engine(
+    db_url,
+    pool_size=20,           # was 5 (default) — hit ceiling after 2 days uptime
+    max_overflow=30,        # was 10 (default) — 50 total connections now
+    pool_pre_ping=True,     # verify connection is alive before use (recycles dead ones)
+    pool_recycle=3600,      # force recycle after 1h to release long-lived leaks
+    pool_timeout=30,        # keep the wait-for-connection timeout
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -160,6 +167,14 @@ class Prediction(Base):
     postmortem = Column(JSON)            # Post-resolution analysis
     thesis_citations = Column(JSON, nullable=True, default=list)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Analytics columns (added 2026-07-03) — populated at create + resolve
+    regime_at_open = Column(String(20), nullable=True)  # TREND_UP | TREND_DOWN | CHOP | UNKNOWN
+    leverage_class = Column(String(30), nullable=True)  # 1x_index_broad | 3x_index | 2x_single_stock | etc.
+    would_be_right_at_01pct = Column(Boolean, nullable=True)
+    would_be_right_at_02pct = Column(Boolean, nullable=True)
+    would_be_right_at_03pct = Column(Boolean, nullable=True)
+    would_be_right_at_05pct = Column(Boolean, nullable=True)
+
 class PaperTrade(Base):
     __tablename__ = "paper_trades"
     id = Column(Integer, primary_key=True, index=True)

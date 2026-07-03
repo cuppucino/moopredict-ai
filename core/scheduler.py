@@ -55,6 +55,45 @@ class Scheduler:
 
         logger.info("[Scheduler] Initializing Python cron jobs...")
 
+        # Moomoo background reconnect — runs every 5 min. If startup connect
+        # timed out (OpenD was down), this brings the connection back when
+        # OpenD recovers, without manual intervention.
+        def _moomoo_reconnect_tick():
+            from services.moomoo_service import moomoo_service
+            if moomoo_service.is_connected:
+                return
+            logger.info("[Scheduler] Moomoo disconnected — attempting background reconnect...")
+            try:
+                ok = moomoo_service.connect()
+                if ok:
+                    logger.success("[Scheduler] Moomoo background reconnect succeeded.")
+            except Exception as e:
+                logger.warning(f"[Scheduler] Moomoo reconnect attempt failed: {e}")
+        self.scheduler.add_job(
+            _moomoo_reconnect_tick,
+            CronTrigger.from_crontab("*/5 * * * *", timezone=pytz.utc),
+            id="moomoo_reconnect_tick",
+            max_instances=1,
+            replace_existing=True,
+        )
+
+        # Morning brief — Phase 6. Runs at 00:00 UTC = 08:00 MYT every weekday.
+        # Scans last 24h news + VIP tweets, scores ETF universe, adds regime banner,
+        # writes markdown to data/morning_briefs/YYYY-MM-DD.md.
+        def _run_morning_brief():
+            from services.morning_brief_engine import morning_brief_engine
+            try:
+                morning_brief_engine.generate_brief()
+            except Exception as e:
+                logger.error(f"[Scheduler] Morning brief generation failed: {e}")
+        self.scheduler.add_job(
+            _run_morning_brief,
+            CronTrigger.from_crontab("0 0 * * 1-5", timezone=pytz.utc),
+            id="morning_brief_job",
+            max_instances=1,
+            replace_existing=True,
+        )
+
         # Scrapers
         self.scheduler.add_job(news_scraper.run, CronTrigger.from_crontab("0 * * * *", timezone=pytz.utc), id="news_scrape_job")
         self.scheduler.add_job(x_scraper.run, CronTrigger.from_crontab("*/15 * * * *", timezone=pytz.utc), id="x_scrape_job")

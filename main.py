@@ -46,18 +46,45 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Starting MooPredict Python Backend...")
     try:
         init_db()
-        moomoo_service.connect()
-        scheduler.init()
-        logger.info("✅ Startup sequence complete.")
     except Exception as e:
-        logger.error(f"❌ Startup failure: {e}")
-    
+        logger.error(f"❌ DB init failure: {e}")
+
+    # Attempt moomoo connect with a STRICT timeout so a dead OpenD can never
+    # block FastAPI startup again (see 2026-06-27 41h wedge incident).
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        await asyncio.wait_for(
+            loop.run_in_executor(None, moomoo_service.connect),
+            timeout=10.0,
+        )
+        if moomoo_service.is_connected:
+            logger.success("[Moomoo] Connected at startup.")
+        else:
+            logger.warning("[Moomoo] connect() returned without success. Will retry in background.")
+    except asyncio.TimeoutError:
+        logger.error("[Moomoo] Startup connect timed out after 10s — likely OpenD is down. Continuing without moomoo; yfinance fallback will serve prices. Background reconnect will retry every 5 min.")
+    except Exception as e:
+        logger.error(f"[Moomoo] Startup connect raised: {e}. Continuing without moomoo.")
+
+    try:
+        scheduler.init()
+        logger.info("✅ Startup sequence complete (moomoo connected: %s)." % moomoo_service.is_connected)
+    except Exception as e:
+        logger.error(f"❌ Scheduler init failure: {e}")
+
     yield
-    
+
     # Shutdown logic
     logger.info("Stopping MooPredict...")
-    scheduler.shutdown()
-    moomoo_service.close()
+    try:
+        scheduler.shutdown()
+    except Exception as e:
+        logger.error(f"Scheduler shutdown error: {e}")
+    try:
+        moomoo_service.close()
+    except Exception as e:
+        logger.error(f"Moomoo shutdown error: {e}")
 
 app = FastAPI(title="MooPredict AI API", lifespan=lifespan)
 
@@ -73,6 +100,36 @@ app.add_middleware(
 @app.get("/health")
 def health_check():
     return {"ok": True, "uptime": time.time() - startup_time if 'startup_time' in globals() else 0}
+
+@app.get("/api/health")
+def system_health():
+    """At-a-glance system status — moomoo, scrapers, scheduler, predictions."""
+    from datetime import datetime
+    from core.database import SessionLocal, Prediction
+    from services.data_freshness import freshness_registry
+    db = SessionLocal()
+    try:
+        pending = db.query(Prediction).filter(Prediction.outcome == None).count()
+        total = db.query(Prediction).count()
+    finally:
+        db.close()
+    return {
+        "ok": True,
+        "uptime_sec": int(time.time() - startup_time) if 'startup_time' in globals() else 0,
+        "moomoo": {
+            "connected": bool(moomoo_service.is_connected),
+            "host": getattr(moomoo_service, "host", None),
+        },
+        "scheduler_running": bool(getattr(scheduler, "is_running", False)),
+        "predictions": {
+            "active": pending,
+            "total": total,
+        },
+        "freshness": {
+            "moomoo_quote_age_min": freshness_registry.get_age_minutes("moomoo_quote") if hasattr(freshness_registry, "get_age_minutes") else None,
+        },
+        "checked_at": datetime.utcnow().isoformat(),
+    }
 
 @app.get("/api/v1/commands/freshness")
 def get_v1_freshness():
@@ -586,6 +643,106 @@ def create_prediction(payload: dict):
             )
         raise HTTPException(status_code=400, detail=res.get("error", "Failed to create prediction."))
     return res
+
+@app.get("/api/morning_brief/today")
+def get_morning_brief_today():
+    """Return today's brief as JSON. Generates if missing."""
+    from services.morning_brief_engine import morning_brief_engine
+    from datetime import date
+    return morning_brief_engine.generate_brief(date.today())
+
+@app.get("/api/morning_brief/today/markdown", response_class=None)
+def get_morning_brief_markdown():
+    """Return today's brief as markdown text — copy-paste ready for openclaw."""
+    from services.morning_brief_engine import morning_brief_engine
+    from datetime import date
+    from fastapi.responses import PlainTextResponse
+    result = morning_brief_engine.generate_brief(date.today())
+    md = morning_brief_engine._render_markdown(result)
+    return PlainTextResponse(md)
+
+@app.get("/api/morning_brief/{brief_date}")
+def get_morning_brief_by_date(brief_date: str):
+    """Return brief for a specific date (YYYY-MM-DD). Generates if missing."""
+    from services.morning_brief_engine import morning_brief_engine
+    from datetime import date
+    try:
+        d = date.fromisoformat(brief_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date format: {brief_date}. Use YYYY-MM-DD.")
+    return morning_brief_engine.generate_brief(d)
+
+@app.get("/api/track-record/analytics")
+def get_track_record_analytics(window_days: int = 30):
+    """
+    Deep-cut analytics: WR at 4 threshold levels, breakdowns by leverage class + regime.
+    Enables data-driven answers to:
+      - Should threshold be 0.5% or 0.1%?
+      - Do leveraged predictions have different WR than 1x?
+      - Do regime-aligned predictions win more?
+    """
+    from datetime import timedelta
+    from core.database import SessionLocal, Prediction
+    db = SessionLocal()
+    try:
+        cutoff = datetime.utcnow() - timedelta(days=window_days)
+        preds = db.query(Prediction).filter(
+            Prediction.outcome.in_(["RIGHT", "WRONG"]),
+            Prediction.created_at >= cutoff,
+        ).all()
+        n = len(preds)
+        if n == 0:
+            return {"n_resolved": 0, "window_days": window_days, "message": "no resolved predictions in window"}
+
+        def wr(attr):
+            hits = [1 for p in preds if getattr(p, attr) is True]
+            return round(len(hits) / n, 4)
+
+        # By leverage class
+        by_leverage = {}
+        for p in preds:
+            cls = p.leverage_class or "unknown"
+            if cls not in by_leverage:
+                by_leverage[cls] = {"n": 0, "wins_05pct": 0, "wins_01pct": 0}
+            by_leverage[cls]["n"] += 1
+            if p.would_be_right_at_05pct is True:
+                by_leverage[cls]["wins_05pct"] += 1
+            if p.would_be_right_at_01pct is True:
+                by_leverage[cls]["wins_01pct"] += 1
+        for cls, d in by_leverage.items():
+            d["wr_at_05pct"] = round(d["wins_05pct"] / d["n"], 4)
+            d["wr_at_01pct"] = round(d["wins_01pct"] / d["n"], 4)
+
+        # By regime
+        by_regime = {}
+        for p in preds:
+            reg = p.regime_at_open or "not_tagged"
+            if reg not in by_regime:
+                by_regime[reg] = {"n": 0, "wins_05pct": 0, "wins_01pct": 0}
+            by_regime[reg]["n"] += 1
+            if p.would_be_right_at_05pct is True:
+                by_regime[reg]["wins_05pct"] += 1
+            if p.would_be_right_at_01pct is True:
+                by_regime[reg]["wins_01pct"] += 1
+        for reg, d in by_regime.items():
+            d["wr_at_05pct"] = round(d["wins_05pct"] / d["n"], 4)
+            d["wr_at_01pct"] = round(d["wins_01pct"] / d["n"], 4)
+
+        return {
+            "n_resolved": n,
+            "window_days": window_days,
+            "wr_by_threshold": {
+                "at_0.1pct": wr("would_be_right_at_01pct"),
+                "at_0.2pct": wr("would_be_right_at_02pct"),
+                "at_0.3pct": wr("would_be_right_at_03pct"),
+                "at_0.5pct": wr("would_be_right_at_05pct"),
+            },
+            "wr_by_leverage_class": by_leverage,
+            "wr_by_regime": by_regime,
+        }
+    finally:
+        db.close()
+
 
 @app.post("/api/predictions/{prediction_id}/cancel")
 def cancel_prediction(prediction_id: int, payload: dict = None):
