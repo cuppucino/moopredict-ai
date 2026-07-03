@@ -20,6 +20,84 @@ def count_trading_days(start_date: datetime, end_date: datetime) -> int:
         curr += timedelta(days=1)
     return days
 
+
+# ─── Analytics helpers (added 2026-07-03 for threshold/regime/leverage analysis) ──
+
+# Leverage class buckets. Any symbol not listed → "1x_stock" (legacy single-stock predictions).
+_LEVERAGE_MAP = {
+    # 1x broad index
+    **{s: "1x_index_broad" for s in ["SPY", "QQQ", "DIA", "IWM"]},
+    # 1x sector SPDRs
+    **{s: "1x_sector" for s in ["XLK", "XLE", "XLF", "XLV", "XLI", "XLP", "XLY", "XLU", "XLB", "XLRE", "XLC"]},
+    # 1x thematic
+    **{s: "1x_thematic" for s in ["SOXX", "SMH", "XBI", "DRAM", "ARKK"]},
+    # 1x commodity
+    **{s: "1x_commodity" for s in ["GLD", "SLV", "USO"]},
+    # 2x index
+    **{s: "2x_index" for s in ["SSO", "QLD"]},
+    # 3x index (bull + bear grouped)
+    **{s: "3x_index" for s in ["TQQQ", "UPRO", "TNA", "SPXL", "SQQQ", "SPXU", "TZA", "SPXS"]},
+    # 3x sector (bull + bear)
+    **{s: "3x_sector" for s in ["TECL", "ERX", "FAS", "LABU", "NAIL", "DPST", "TECS", "ERY", "FAZ", "LABD"]},
+    # 2x single-stock (bull + bear)
+    **{s: "2x_single_stock" for s in [
+        "NVDL", "MUU", "TSLL", "AAPU", "MSFL", "METU", "AMZU", "GGLL", "AMDL",
+        "NVDS", "MUD", "TSLQ", "TSLS", "AAPD", "MSFD", "METD", "AMZD", "GGLS", "AMDS",
+    ]},
+}
+
+
+def classify_leverage(symbol: str) -> str:
+    """Return the leverage bucket for a symbol. Defaults to '1x_stock' for legacy single-stock."""
+    return _LEVERAGE_MAP.get((symbol or "").upper().strip(), "1x_stock")
+
+
+def classify_regime() -> str:
+    """
+    Detect current market regime via SPY 5-day behavior. Same logic as morning_brief_engine
+    but callable at prediction creation time (which may be off-cron).
+    Returns: TREND_UP | TREND_DOWN | CHOP | UNKNOWN.
+    """
+    try:
+        from services.ta_engine import ta_engine
+        df = ta_engine._get_kline_data("SPY", num=6)
+        if df is None or df.empty or len(df) < 5:
+            return "UNKNOWN"
+        closes = df["close"].tail(5).tolist()
+        first, last = closes[0], closes[-1]
+        hi, lo = max(closes), min(closes)
+        move_pct = (last - first) / first * 100 if first else 0
+        if move_pct > 1.5 and last > hi * 0.97:
+            return "TREND_UP"
+        elif move_pct < -1.5 and last < lo * 1.03:
+            return "TREND_DOWN"
+        else:
+            return "CHOP"
+    except Exception as e:
+        logger.warning(f"[classify_regime] failed: {e}")
+        return "UNKNOWN"
+
+
+def compute_threshold_flags(direction: str, move_pct: float) -> Dict[str, bool]:
+    """Return dict of would_be_right_at_XXpct booleans for the 4 threshold levels."""
+    if move_pct is None or direction not in ("UP", "DOWN"):
+        return {k: None for k in ("would_be_right_at_01pct", "would_be_right_at_02pct",
+                                   "would_be_right_at_03pct", "would_be_right_at_05pct")}
+    if direction == "UP":
+        return {
+            "would_be_right_at_01pct": move_pct > 0.1,
+            "would_be_right_at_02pct": move_pct > 0.2,
+            "would_be_right_at_03pct": move_pct > 0.3,
+            "would_be_right_at_05pct": move_pct > 0.5,
+        }
+    else:  # DOWN
+        return {
+            "would_be_right_at_01pct": move_pct < -0.1,
+            "would_be_right_at_02pct": move_pct < -0.2,
+            "would_be_right_at_03pct": move_pct < -0.3,
+            "would_be_right_at_05pct": move_pct < -0.5,
+        }
+
 def generate_thesis_from_citations(symbol: str, direction: str, citations: list) -> str:
     """Build a human-readable thesis string citing each catalyst."""
     try:
@@ -202,6 +280,10 @@ class PredictionService:
                 else:
                     prediction_tag = "TA_ONLY"
 
+            # Step 5.5: analytics stamping — regime + leverage class at time of creation
+            regime_at_open = classify_regime()
+            leverage_class = classify_leverage(symbol)
+
             # Step 6: Database transaction (inserting the Prediction object)
             logger.info(f"[Prediction] step 6 started for {symbol} (Writing prediction to database)")
             prediction = Prediction(
@@ -220,7 +302,9 @@ class PredictionService:
                 deadline=datetime.utcnow() + timedelta(days=timeframe_days),
                 created_at=datetime.utcnow(),
                 notes=f"Freshness: {freshness_snapshot}",
-                thesis_citations=citations
+                thesis_citations=citations,
+                regime_at_open=regime_at_open,
+                leverage_class=leverage_class,
             )
             
             db.add(prediction)
@@ -347,6 +431,11 @@ class PredictionService:
             prediction.actual_move_pct = move_pct
             prediction.resolved_at = datetime.utcnow()
             prediction.notes = manual_notes
+
+            # Analytics: stamp threshold-would-be-right flags for 0.1/0.2/0.3/0.5%
+            flags = compute_threshold_flags(prediction.direction, move_pct)
+            for k, v in flags.items():
+                setattr(prediction, k, v)
             
             # --- Auto Post-Mortem ---
             try:

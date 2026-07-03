@@ -211,11 +211,53 @@ TICKER_ALIASES = {
     "XBI":   ["biotech ETF", "biotechnology sector"],
     "DRAM":  ["memory chip ETF", "DRAM ETF", "Roundhill Memory"],
     "ARKK":  ["ARK Innovation", "Cathie Wood ETF", "disruptive innovation"],
-    # Leveraged ETFs (deferred — high risk)
-    "TQQQ":  ["3x Nasdaq", "leveraged QQQ"],
-    "SQQQ":  ["inverse Nasdaq", "short QQQ"],
-    "SOXL":  ["3x semis", "leveraged semis"],
-    "SOXS":  ["inverse semis"],
+    # ─── LEVERAGED / INVERSE ETFs (added 2026-07-02 — aggressive paper universe) ──
+    # Index 3x bulls
+    "TQQQ":  ["3x Nasdaq", "leveraged QQQ", "3x tech", "TQQQ"],
+    "UPRO":  ["3x SPY", "leveraged S&P 500", "UPRO"],
+    "TNA":   ["3x Russell 2000", "leveraged small caps", "TNA"],
+    "SPXL":  ["3x SPY Direxion", "SPXL"],
+    # Index 3x bears
+    "SQQQ":  ["inverse Nasdaq", "short QQQ", "3x bear Nasdaq", "SQQQ"],
+    "SPXU":  ["inverse SPY", "3x bear S&P", "SPXU"],
+    "TZA":   ["inverse Russell 2000", "3x bear small caps", "TZA"],
+    "SPXS":  ["inverse SPY Direxion", "SPXS"],
+    # Index 2x bulls
+    "SSO":   ["2x SPY", "SSO"],
+    "QLD":   ["2x QQQ", "QLD"],
+    # Sector 3x bulls
+    "TECL":  ["3x tech sector", "leveraged XLK", "TECL"],
+    "ERX":   ["3x energy", "leveraged XLE", "ERX"],
+    "FAS":   ["3x financials", "leveraged XLF", "FAS"],
+    "DPST":  ["3x regional banks", "DPST"],
+    "LABU":  ["3x biotech", "leveraged XBI", "LABU"],
+    "NAIL":  ["3x homebuilders", "NAIL"],
+    # Sector 3x bears
+    "TECS":  ["inverse tech sector", "3x bear XLK", "TECS"],
+    "ERY":   ["inverse energy", "3x bear XLE", "ERY"],
+    "FAZ":   ["inverse financials", "3x bear XLF", "FAZ"],
+    "LABD":  ["inverse biotech", "3x bear XBI", "LABD"],
+    # Single-stock 2x bulls (GraniteShares / Direxion)
+    "NVDL":  ["2x Nvidia", "leveraged NVDA long", "NVDL"],
+    "MUU":   ["2x Micron", "leveraged MU long", "MUU"],
+    "TSLL":  ["2x Tesla", "leveraged TSLA long", "TSLL"],
+    "AAPU":  ["2x Apple", "leveraged AAPL long", "AAPU"],
+    "MSFL":  ["2x Microsoft", "leveraged MSFT long", "MSFL"],
+    "METU":  ["2x Meta", "leveraged META long", "METU"],
+    "AMZU":  ["2x Amazon", "leveraged AMZN long", "AMZU"],
+    "GGLL":  ["2x Google", "leveraged GOOGL long", "GGLL"],
+    "AMDL":  ["2x AMD", "leveraged AMD long", "AMDL"],
+    # Single-stock 2x bears
+    "NVDS":  ["inverse Nvidia", "short NVDA 2x", "NVDS"],
+    "MUD":   ["inverse Micron", "short MU 2x", "MUD"],
+    "TSLQ":  ["inverse Tesla", "short TSLA 2x", "TSLQ"],
+    "TSLS":  ["inverse Tesla Direxion", "TSLS"],
+    "AAPD":  ["inverse Apple", "short AAPL 2x", "AAPD"],
+    "MSFD":  ["inverse Microsoft", "short MSFT 2x", "MSFD"],
+    "METD":  ["inverse Meta", "short META 2x", "METD"],
+    "AMZD":  ["inverse Amazon", "short AMZN 2x", "AMZD"],
+    "GGLS":  ["inverse Google", "short GOOGL 2x", "GGLS"],
+    "AMDS":  ["inverse AMD", "short AMD 2x", "AMDS"],
     # Commodity ETFs
     "GLD":   ["gold ETF", "physical gold"],
     "SLV":   ["silver ETF"],
