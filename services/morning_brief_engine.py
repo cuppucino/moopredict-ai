@@ -143,11 +143,32 @@ class MorningBriefEngine:
         # Rank top 5
         top5 = sorted(etf_scores.items(), key=lambda kv: kv[1]["score"], reverse=True)[:5]
 
+        # Structure analysis for the top 5 (Phase 6.2) — never blocks brief generation
+        top5_list = [{"ticker": t, **s} for t, s in top5]
+        try:
+            from services.structure_engine import structure_engine
+            for e in top5_list:
+                st = structure_engine.get_structure(e["ticker"])
+                if not st.get("error"):
+                    e["structure"] = {
+                        "confluence": st["confluence"],
+                        "capitulation": st.get("capitulation", {"detected": False}),
+                        "nearest_demand": st["demand_zones"][0] if st["demand_zones"] else None,
+                        "nearest_supply": st["supply_zones"][0] if st["supply_zones"] else None,
+                        "unfilled_fvgs": [f for f in st["fvgs"] if not f["filled"]][:2],
+                        "volume_poc": st["volume_poc"],
+                        "fib_ote": st["fib"].get("ote_band") if st["fib"].get("available") else None,
+                        "price_in_ote": st["fib"].get("price_in_ote", False),
+                        "bos": st["bos"],
+                    }
+        except Exception as e:
+            logger.warning(f"[MorningBrief] structure enrichment failed: {e}")
+
         result = {
             "date": target_date.isoformat(),
             "generated_at": datetime.utcnow().isoformat(),
             "regime": regime,
-            "top5": [{"ticker": t, **s} for t, s in top5],
+            "top5": top5_list,
             "all_scores": etf_scores,
             "yesterday_recap": recap,
             "counts": {
@@ -337,6 +358,27 @@ class MorningBriefEngine:
                 lines.append("- VIP tweets:")
                 for v in e["vip_tweets"]:
                     lines.append(f"  - @{v['handle']} (T{v['tier']}, {v['sentiment']}): {v['content'][:120]}")
+            st = e.get("structure")
+            if st:
+                parts = []
+                if st["confluence"]["score"]:
+                    parts.append(f"confluence {st['confluence']['score']} ({', '.join(st['confluence']['signals'])})")
+                if st["capitulation"].get("detected"):
+                    parts.append(f"⚡ {st['capitulation']['type']} — {st['capitulation']['note']}")
+                if st["nearest_demand"] and not st["nearest_demand"]["mitigated"]:
+                    parts.append(f"demand ${st['nearest_demand']['low']}-{st['nearest_demand']['high']}")
+                if st["nearest_supply"] and not st["nearest_supply"]["mitigated"]:
+                    parts.append(f"supply ${st['nearest_supply']['low']}-{st['nearest_supply']['high']}")
+                if st["unfilled_fvgs"]:
+                    f0 = st["unfilled_fvgs"][0]
+                    parts.append(f"FVG {f0['type']} {f0['band']}")
+                if st["volume_poc"]:
+                    parts.append(f"POC ${st['volume_poc']}")
+                if st["price_in_ote"]:
+                    parts.append("in OTE band")
+                if st["bos"]["direction"] != "none":
+                    parts.append(f"BoS {st['bos']['direction']} @{st['bos']['level']}")
+                lines.append(f"- **Structure:** {' · '.join(parts) if parts else 'no notable signals'}")
             lines.append("")
 
         lines += ["## 📊 Yesterday's resolved predictions", ""]

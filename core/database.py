@@ -174,6 +174,9 @@ class Prediction(Base):
     would_be_right_at_02pct = Column(Boolean, nullable=True)
     would_be_right_at_03pct = Column(Boolean, nullable=True)
     would_be_right_at_05pct = Column(Boolean, nullable=True)
+    # Structure analytics (Phase 6.2, added 2026-07-06) — stamped at creation
+    structure_signals = Column(JSON, nullable=True)      # e.g. ["demand_zone", "ote_band", "down_capitulation"]
+    structure_confluence = Column(Integer, nullable=True)  # count of structure signals at entry
 
 class PaperTrade(Base):
     __tablename__ = "paper_trades"

@@ -284,6 +284,18 @@ class PredictionService:
             regime_at_open = classify_regime()
             leverage_class = classify_leverage(symbol)
 
+            # Structure stamping (Phase 6.2) — signals present at entry, for later
+            # per-concept WR measurement. Never blocks creation on failure.
+            structure_signals, structure_confluence = None, None
+            try:
+                from services.structure_engine import structure_engine
+                struct = structure_engine.get_structure(symbol)
+                if not struct.get("error"):
+                    structure_signals = struct["confluence"]["signals"]
+                    structure_confluence = struct["confluence"]["score"]
+            except Exception as se:
+                logger.warning(f"[Prediction] structure stamping failed for {symbol}: {se}")
+
             # Step 6: Database transaction (inserting the Prediction object)
             logger.info(f"[Prediction] step 6 started for {symbol} (Writing prediction to database)")
             prediction = Prediction(
@@ -305,6 +317,8 @@ class PredictionService:
                 thesis_citations=citations,
                 regime_at_open=regime_at_open,
                 leverage_class=leverage_class,
+                structure_signals=structure_signals,
+                structure_confluence=structure_confluence,
             )
             
             db.add(prediction)
@@ -373,18 +387,48 @@ class PredictionService:
         finally:
             db.close()
 
-    def resolve_prediction(self, prediction_id: int, manual_notes: str = "") -> Dict:
+    def _market_traded_since(self, symbol: str, created_at: datetime) -> bool:
+        """
+        Holiday guard: True if at least one trading session (daily kline bar) exists
+        on/after the creation date. Prevents resolving on frozen holiday prices
+        (the Jul 4 weekend bug — predictions #37-40 resolved WRONG at 0.00% move
+        because the market never opened during their window).
+        Fails OPEN (returns True) on any error so it can never block resolution.
+        """
+        try:
+            import pandas as pd
+            from services.ta_engine import ta_engine
+            df = ta_engine._get_kline_data(symbol, num=10)
+            if df is None or df.empty or "time_key" not in df.columns:
+                return True
+            bar_dates = pd.to_datetime(df["time_key"]).dt.date
+            return any(d >= created_at.date() for d in bar_dates)
+        except Exception as e:
+            logger.warning(f"[Prediction] holiday guard failed for {symbol}: {e} — allowing resolution")
+            return True
+
+    def resolve_prediction(self, prediction_id: int, manual_notes: str = "", force: bool = False) -> Dict:
         """
         Evaluate a single prediction against current market data.
+        force=True skips the holiday guard (manual override).
         """
         db = SessionLocal()
         try:
             prediction = db.query(Prediction).filter(Prediction.id == prediction_id).first()
             if not prediction:
                 return {"success": False, "error": "Prediction not found"}
-            
+
             if prediction.outcome:
                 return {"success": False, "error": "Already resolved"}
+
+            # Holiday guard: if no trading session occurred since creation, defer
+            # (extend deadline by 1 day) instead of resolving on a frozen price.
+            if not force and prediction.created_at and not self._market_traded_since(prediction.symbol, prediction.created_at):
+                prediction.deadline = (prediction.deadline or datetime.utcnow()) + timedelta(days=1)
+                db.commit()
+                logger.info(f"[Prediction] #{prediction.id} deferred — no trading session since creation (holiday/weekend). Deadline extended to {prediction.deadline}.")
+                return {"success": False, "deferred": True,
+                        "reason": "no trading session since creation — deadline extended 1 day"}
             
             # Check for 10-trading-day auto-expire to NEUTRAL
             if not prediction.created_at:
@@ -418,12 +462,18 @@ class PredictionService:
 
             move_pct = ((exit_price - prediction.entry_price) / prediction.entry_price) * 100 if prediction.entry_price > 0 else 0
             
+            # Resolution threshold v2 (2026-07-06): lowered 0.5% -> 0.3%.
+            # Analytics at n=18 showed WR identical at 0.1/0.2/0.3% (38.9%) vs 22.2% at 0.5% —
+            # every direction-correct pick moved >0.3%; the 0.3-0.5 band was purely where
+            # near-misses died. 0.3% keeps a real noise floor while capturing genuine moves.
+            # Historical outcomes NOT restated; would_be_right_at_* flags preserve all views.
+            THRESHOLD = 0.3
             outcome = "WRONG"
-            if prediction.direction == "UP" and move_pct > 0.5: # 0.5% buffer
+            if prediction.direction == "UP" and move_pct > THRESHOLD:
                 outcome = "RIGHT"
-            elif prediction.direction == "DOWN" and move_pct < -0.5:
+            elif prediction.direction == "DOWN" and move_pct < -THRESHOLD:
                 outcome = "RIGHT"
-            elif prediction.direction == "FLAT" and abs(move_pct) <= 0.5:
+            elif prediction.direction == "FLAT" and abs(move_pct) <= THRESHOLD:
                 outcome = "RIGHT"
             
             prediction.outcome = outcome
