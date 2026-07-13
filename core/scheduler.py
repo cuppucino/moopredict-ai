@@ -1,4 +1,5 @@
 import pytz
+from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from loguru import logger
@@ -55,20 +56,63 @@ class Scheduler:
 
         logger.info("[Scheduler] Initializing Python cron jobs...")
 
-        # Moomoo background reconnect — runs every 5 min. If startup connect
-        # timed out (OpenD was down), this brings the connection back when
-        # OpenD recovers, without manual intervention.
+        # Moomoo background reconnect — runs every 5 min. Two failure modes:
+        #   1) Hard disconnect: startup connect timed out (OpenD down). Reconnect
+        #      when OpenD recovers.
+        #   2) Silent stale: socket reports connected but the quote stream is dead
+        #      (observed 2026-07-09 — 25h stale while is_connected=True). The old
+        #      tick only handled (1), so a wedged subscription rode uncorrected.
+        #      During US market hours, if quotes are stale we force a full
+        #      close()+connect() to rebuild the quote_ctx subscription.
         def _moomoo_reconnect_tick():
             from services.moomoo_service import moomoo_service
-            if moomoo_service.is_connected:
+            if not moomoo_service.is_connected:
+                logger.info("[Scheduler] Moomoo disconnected — attempting background reconnect...")
+                try:
+                    ok = moomoo_service.connect()
+                    if ok:
+                        logger.success("[Scheduler] Moomoo background reconnect succeeded.")
+                except Exception as e:
+                    logger.warning(f"[Scheduler] Moomoo reconnect attempt failed: {e}")
                 return
-            logger.info("[Scheduler] Moomoo disconnected — attempting background reconnect...")
+
+            # Connected — actively probe the quote stream during market hours. A passive
+            # freshness read is useless here: nothing else in-process fetches quotes
+            # (klines replaced them), so the metric sits at the never-updated sentinel
+            # (999999) and an age>threshold test would fire an endless reconnect storm
+            # (observed 2026-07-09: 18 needless reconnects in 90 min). Instead we fetch a
+            # canary quote: success both proves the stream is alive AND re-stamps freshness;
+            # only a failed probe (genuinely wedged subscription) forces a rebuild.
+            now = datetime.now(pytz.utc)
+            # US regular session in July (EDT, UTC-4): 13:30–20:00 UTC, Mon–Fri.
+            market_open = (
+                now.weekday() < 5
+                and (now.hour, now.minute) >= (13, 30)
+                and now.hour < 20
+            )
+            if not market_open:
+                return
             try:
+                q = moomoo_service.get_stock_quote("SPY")
+                healthy = bool(q and q.get("last_price", 0) > 0)
+            except Exception as e:
+                logger.warning(f"[Scheduler] Moomoo quote probe errored: {e}")
+                healthy = False
+            if healthy:
+                return  # stream alive; freshness stamped inside get_stock_quote
+            logger.warning(
+                "[Scheduler] Moomoo quote probe (SPY) returned no price during market "
+                "hours — forcing full reconnect."
+            )
+            try:
+                moomoo_service.close()
                 ok = moomoo_service.connect()
                 if ok:
-                    logger.success("[Scheduler] Moomoo background reconnect succeeded.")
+                    logger.success("[Scheduler] Moomoo stale-quote reconnect succeeded.")
+                else:
+                    logger.warning("[Scheduler] Moomoo stale-quote reconnect failed.")
             except Exception as e:
-                logger.warning(f"[Scheduler] Moomoo reconnect attempt failed: {e}")
+                logger.warning(f"[Scheduler] Moomoo stale-quote reconnect error: {e}")
         self.scheduler.add_job(
             _moomoo_reconnect_tick,
             CronTrigger.from_crontab("*/5 * * * *", timezone=pytz.utc),
@@ -80,6 +124,12 @@ class Scheduler:
         # Morning brief — Phase 6. Runs at 00:00 UTC = 08:00 MYT every weekday.
         # Scans last 24h news + VIP tweets, scores ETF universe, adds regime banner,
         # writes markdown to data/morning_briefs/YYYY-MM-DD.md.
+        #
+        # ⚠️ APScheduler day-of-week gotcha (bug found & fixed 2026-07-13):
+        # from_crontab does NOT remap the DOW field to Unix-cron numbering — it reads
+        # numeric DOW as 0=Mon..6=Sun. So a Unix-style "1-5" fires Tue–Sat (not Mon–Fri)
+        # and "0" fires Mon (not Sun). ALWAYS use names (mon-fri / sun) in DOW here.
+        # This silently skipped every Monday brief and wasted a Saturday run for weeks.
         def _run_morning_brief():
             from services.morning_brief_engine import morning_brief_engine
             try:
@@ -88,8 +138,35 @@ class Scheduler:
                 logger.error(f"[Scheduler] Morning brief generation failed: {e}")
         self.scheduler.add_job(
             _run_morning_brief,
-            CronTrigger.from_crontab("0 0 * * 1-5", timezone=pytz.utc),
+            CronTrigger.from_crontab("0 0 * * mon-fri", timezone=pytz.utc),
             id="morning_brief_job",
+            max_instances=1,
+            replace_existing=True,
+        )
+
+        # Push the brief into openclaw's workspace 5 min after generation, so kf's
+        # morning prompt is just "run today's session" — no wall-of-text pasting.
+        # One-way: server writes, openclaw reads (per the research-pipeline rule).
+        def _push_brief_to_openclaw():
+            from pathlib import Path
+            from datetime import date
+            src = Path(f"/Users/admin/moopredict-ai/data/morning_briefs/{date.today().isoformat()}.md")
+            dst_dir = Path("/Users/admin/.openclaw/workspace/morning_briefs")
+            try:
+                if src.exists():
+                    dst_dir.mkdir(parents=True, exist_ok=True)
+                    content = src.read_text()
+                    (dst_dir / src.name).write_text(content)
+                    (dst_dir / "latest.md").write_text(content)
+                    logger.info(f"[Scheduler] Brief pushed to openclaw workspace: {src.name}")
+                else:
+                    logger.warning(f"[Scheduler] Brief push skipped — {src} not found")
+            except Exception as e:
+                logger.error(f"[Scheduler] Brief push failed: {e}")
+        self.scheduler.add_job(
+            _push_brief_to_openclaw,
+            CronTrigger.from_crontab("5 0 * * mon-fri", timezone=pytz.utc),
+            id="brief_push_openclaw_job",
             max_instances=1,
             replace_existing=True,
         )
@@ -108,13 +185,13 @@ class Scheduler:
         
         # Market Reminders (UTC)
         # 13:00 UTC = 9:00 PM MYT
-        self.scheduler.add_job(lambda: notification_queue.enqueue("🚨 *US Market opens in 30 minutes!* ⏳", "alert", category="news"), CronTrigger.from_crontab("0 13 * * 1-5", timezone=pytz.utc), id="market_open_soon_job")
+        self.scheduler.add_job(lambda: notification_queue.enqueue("🚨 *US Market opens in 30 minutes!* ⏳", "alert", category="news"), CronTrigger.from_crontab("0 13 * * mon-fri", timezone=pytz.utc), id="market_open_soon_job")
         
         # 13:30 UTC = 9:30 PM MYT
-        self.scheduler.add_job(lambda: notification_queue.enqueue("🔔 *US Market is OPEN!* 📈", "info", category="news"), CronTrigger.from_crontab("30 13 * * 1-5", timezone=pytz.utc), id="market_open_job")
+        self.scheduler.add_job(lambda: notification_queue.enqueue("🔔 *US Market is OPEN!* 📈", "info", category="news"), CronTrigger.from_crontab("30 13 * * mon-fri", timezone=pytz.utc), id="market_open_job")
         
         # 20:55 UTC = 04:55 AM MYT (5 mins before close)
-        self.scheduler.add_job(lambda: notification_queue.enqueue("🔔 *US Market is closing in 5 minutes!* 📉", "warning", category="news"), CronTrigger.from_crontab("55 20 * * 1-5", timezone=pytz.utc), id="market_close_soon_job")
+        self.scheduler.add_job(lambda: notification_queue.enqueue("🔔 *US Market is closing in 5 minutes!* 📉", "warning", category="news"), CronTrigger.from_crontab("55 20 * * mon-fri", timezone=pytz.utc), id="market_close_soon_job")
 
         # 21:00 UTC = 05:00 AM MYT
         self.scheduler.add_job(briefing_service.generate_eod_summary, CronTrigger.from_crontab("0 21 * * *", timezone=pytz.utc), id="eod_summary_job")
@@ -131,7 +208,7 @@ class Scheduler:
         # Trailing Stops (Every 5 minutes during market hours)
         self.scheduler.add_job(
             _run_job_with_timeout(trailing_stop_service.update_stops, 30.0),
-            CronTrigger.from_crontab("*/5 13-21 * * 1-5", timezone=pytz.utc),
+            CronTrigger.from_crontab("*/5 13-21 * * mon-fri", timezone=pytz.utc),
             id="trailing_stop_job",
             max_instances=2
         )
@@ -147,7 +224,7 @@ class Scheduler:
             finally:
                 db.close()
         
-        self.scheduler.add_job(ta_snapshot_job, CronTrigger.from_crontab("0 13-21 * * 1-5", timezone=pytz.utc), id="ta_snapshot_job")
+        self.scheduler.add_job(ta_snapshot_job, CronTrigger.from_crontab("0 13-21 * * mon-fri", timezone=pytz.utc), id="ta_snapshot_job")
 
         # Sentiment Snapshots (Every hour during market hours)
         from services.sentiment_engine import sentiment_engine
@@ -160,7 +237,7 @@ class Scheduler:
             finally:
                 db.close()
         
-        self.scheduler.add_job(sentiment_snapshot_job, CronTrigger.from_crontab("0 13-21 * * 1-5", timezone=pytz.utc), id="sentiment_snapshot_job")
+        self.scheduler.add_job(sentiment_snapshot_job, CronTrigger.from_crontab("0 13-21 * * mon-fri", timezone=pytz.utc), id="sentiment_snapshot_job")
 
         # Options Snapshots (Every 4 hours during market hours - options data is heavy)
         from services._legacy.options_engine import options_engine
@@ -173,7 +250,7 @@ class Scheduler:
             finally:
                 db.close()
         
-        self.scheduler.add_job(options_snapshot_job, CronTrigger.from_crontab("0 14,18,22 * * 1-5", timezone=pytz.utc), id="options_snapshot_job")
+        self.scheduler.add_job(options_snapshot_job, CronTrigger.from_crontab("0 14,18,22 * * mon-fri", timezone=pytz.utc), id="options_snapshot_job")
 
         # PCR Monitor (Every hour)
         def pcr_job():
@@ -201,7 +278,7 @@ class Scheduler:
                 "premarket", 
                 "Perform the daily pre-market sweep and check news catalysts."
             ), 180.0),
-            CronTrigger.from_crontab("0 12 * * 1-5", timezone=pytz.utc),
+            CronTrigger.from_crontab("0 12 * * mon-fri", timezone=pytz.utc),
             id="openclaw_premarket_sweep",
             max_instances=2
         )
@@ -214,7 +291,7 @@ class Scheduler:
                 "Do NOT create new predictions in this cycle — only the 12:00 UTC pre-market sweep creates new predictions. "
                 "If no resolutions needed, return silently."
             ), 60.0),
-            CronTrigger.from_crontab("*/30 13-20 * * 1-5", timezone=pytz.utc),
+            CronTrigger.from_crontab("*/30 13-20 * * mon-fri", timezone=pytz.utc),
             id="openclaw_decision_cycle",
             max_instances=2
         )
@@ -225,7 +302,7 @@ class Scheduler:
                 "postmarket",
                 "Run post-market analysis and write daily trading lessons."
             ), 120.0),
-            CronTrigger.from_crontab("30 20 * * 1-5", timezone=pytz.utc),
+            CronTrigger.from_crontab("30 20 * * mon-fri", timezone=pytz.utc),
             id="openclaw_postmarket_analysis",
             max_instances=2
         )
@@ -233,20 +310,20 @@ class Scheduler:
 
         # Weekly Outlook (Sunday 02:00 UTC = 10:00 AM MYT)
         from services._legacy.outlook_service import outlook_service
-        self.scheduler.add_job(outlook_service.generate_weekly_outlook, CronTrigger.from_crontab("0 2 * * 0", timezone=pytz.utc), id="weekly_outlook_job")
+        self.scheduler.add_job(outlook_service.generate_weekly_outlook, CronTrigger.from_crontab("0 2 * * sun", timezone=pytz.utc), id="weekly_outlook_job")
 
         # Strategy Evolution (Sunday 03:00 UTC = 11:00 AM MYT)
-        self.scheduler.add_job(strategy_service.evolve, CronTrigger.from_crontab("0 3 * * 0", timezone=pytz.utc), id="strategy_evolution_job")
+        self.scheduler.add_job(strategy_service.evolve, CronTrigger.from_crontab("0 3 * * sun", timezone=pytz.utc), id="strategy_evolution_job")
 
         # --- Heartbeat Monitoring ---
         # 1. Full Check every 15 min during market hours (13:30-21:00 UTC)
-        self.scheduler.add_job(heartbeat_monitor.run_full_check, CronTrigger.from_crontab("*/15 13-21 * * 1-5", timezone=pytz.utc), id="heartbeat_check_job")
+        self.scheduler.add_job(heartbeat_monitor.run_full_check, CronTrigger.from_crontab("*/15 13-21 * * mon-fri", timezone=pytz.utc), id="heartbeat_check_job")
         
         # 2. Daily P&L Report (21:00 UTC)
-        self.scheduler.add_job(heartbeat_monitor.generate_daily_report, CronTrigger.from_crontab("0 21 * * 1-5", timezone=pytz.utc), id="heartbeat_daily_report")
+        self.scheduler.add_job(heartbeat_monitor.generate_daily_report, CronTrigger.from_crontab("0 21 * * mon-fri", timezone=pytz.utc), id="heartbeat_daily_report")
         
         # 3. Pre-market Scan (13:00 UTC)
-        self.scheduler.add_job(heartbeat_monitor.generate_premarket_scan, CronTrigger.from_crontab("0 13 * * 1-5", timezone=pytz.utc), id="heartbeat_premarket_scan")
+        self.scheduler.add_job(heartbeat_monitor.generate_premarket_scan, CronTrigger.from_crontab("0 13 * * mon-fri", timezone=pytz.utc), id="heartbeat_premarket_scan")
 
         # 4. Off-hours Heartbeat (Every hour)
         self.scheduler.add_job(heartbeat_monitor.run_full_check, CronTrigger.from_crontab("0 * * * *", timezone=pytz.utc), id="heartbeat_offhours_job")
@@ -292,7 +369,7 @@ class Scheduler:
             briefing = macro_service.generate_weekly_briefing()
             notification_queue.enqueue(briefing, level="info", category="news")
             
-        self.scheduler.add_job(macro_calendar_job, CronTrigger.from_crontab("0 4 * * 0", timezone=pytz.utc), id="macro_calendar_job")
+        self.scheduler.add_job(macro_calendar_job, CronTrigger.from_crontab("0 4 * * sun", timezone=pytz.utc), id="macro_calendar_job")
 
         # 3. Weekly ML Retrain (Sunday 05:00 UTC)
         def model_retrain_job():
@@ -307,7 +384,7 @@ class Scheduler:
             )
             notification_queue.enqueue(msg, level="info", category="system")
 
-        self.scheduler.add_job(model_retrain_job, CronTrigger.from_crontab("0 5 * * 0", timezone=pytz.utc), id="model_retrain_job")
+        self.scheduler.add_job(model_retrain_job, CronTrigger.from_crontab("0 5 * * sun", timezone=pytz.utc), id="model_retrain_job")
 
         # 4. Weekly Pattern Review (Sunday 06:00 UTC)
         def pattern_review_job():
@@ -323,11 +400,11 @@ class Scheduler:
             )
             notification_queue.enqueue(msg, level="info", category="general")
 
-        self.scheduler.add_job(pattern_review_job, CronTrigger.from_crontab("0 6 * * 0", timezone=pytz.utc), id="pattern_review_job")
+        self.scheduler.add_job(pattern_review_job, CronTrigger.from_crontab("0 6 * * sun", timezone=pytz.utc), id="pattern_review_job")
 
         # Daily Track Record evaluation (21:30 UTC Mon-Fri)
         from services import track_record
-        self.scheduler.add_job(track_record.run_daily_job, CronTrigger.from_crontab("30 21 * * 1-5", timezone=pytz.utc), id="track_record_daily")
+        self.scheduler.add_job(track_record.run_daily_job, CronTrigger.from_crontab("30 21 * * mon-fri", timezone=pytz.utc), id="track_record_daily")
 
         self.scheduler.start()
         

@@ -206,10 +206,10 @@ TICKER_ALIASES = {
     "XLRE":  ["real estate sector", "REIT ETF"],
     "XLC":   ["communications sector", "communication services"],
     # Thematic / semiconductor ETFs
-    "SOXX":  ["semiconductor ETF", "chip ETF", "semis"],
-    "SMH":   ["semiconductor ETF", "VanEck Semi", "chip ETF"],
+    "SOXX":  ["semiconductor ETF", "chip ETF", "semis", "chipmaker", "chip stocks", "SK Hynix", "Samsung Electronics"],
+    "SMH":   ["semiconductor ETF", "VanEck Semi", "chip ETF", "chipmaker", "SK Hynix", "Samsung Electronics"],
     "XBI":   ["biotech ETF", "biotechnology sector"],
-    "DRAM":  ["memory chip ETF", "DRAM ETF", "Roundhill Memory"],
+    "DRAM":  ["memory chip ETF", "DRAM ETF", "Roundhill Memory", "SK Hynix", "memory chip", "Kioxia", "SanDisk"],
     "ARKK":  ["ARK Innovation", "Cathie Wood ETF", "disruptive innovation"],
     # ─── LEVERAGED / INVERSE ETFs (added 2026-07-02 — aggressive paper universe) ──
     # Index 3x bulls

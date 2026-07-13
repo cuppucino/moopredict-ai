@@ -272,6 +272,14 @@ class PredictionService:
             if prediction_tag not in valid_tags:
                 prediction_tag = None
 
+            # Tagging-hole fix (2026-07-06): a catalyst-class tag override with ZERO
+            # stored citations is unverifiable — downgrade to TA_ONLY. (IWM #42 claimed
+            # WEAK_CATALYST with 0 citations; INTC #15 same pattern. Tags must be
+            # backed by data, not narrative.)
+            if prediction_tag in ("CATALYST_DRIVEN", "WEAK_CATALYST") and not citations:
+                logger.warning(f"[Prediction] {symbol}: tag override '{prediction_tag}' rejected — 0 stored citations. Downgraded to TA_ONLY.")
+                prediction_tag = "TA_ONLY"
+
             if not prediction_tag:
                 if any(abs(c.get("weight", 0)) >= 0.10 for c in citations):
                     prediction_tag = "CATALYST_DRIVEN"
@@ -454,9 +462,23 @@ class PredictionService:
                 }
 
             # Get current price
-            price_data = moomoo_service.get_stock_quote(prediction.symbol)
-            exit_price = price_data.get("last_price", 0.0)
-            
+            # Resolution price source (fixed 2026-07-07): prefer the latest DAILY KLINE
+            # close over get_stock_quote. On Jul 7, #43 resolved on a stale cached quote
+            # (Thursday's close) while the Mac slept, even though Monday's session had
+            # traded — klines returned the correct close the whole time. Klines are
+            # authoritative market data; the quote cache can lie after sleep/outage.
+            exit_price = 0.0
+            try:
+                from services.ta_engine import ta_engine
+                kdf = ta_engine._get_kline_data(prediction.symbol, num=3)
+                if kdf is not None and not kdf.empty:
+                    exit_price = float(kdf["close"].iloc[-1])
+            except Exception as ke:
+                logger.warning(f"[Prediction] kline exit price failed for {prediction.symbol}: {ke}")
+            if exit_price <= 0:
+                price_data = moomoo_service.get_stock_quote(prediction.symbol)
+                exit_price = price_data.get("last_price", 0.0)
+
             if exit_price <= 0:
                 return {"success": False, "error": "Could not fetch exit price"}
 

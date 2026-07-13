@@ -744,6 +744,95 @@ def get_track_record_analytics(window_days: int = 30):
         db.close()
 
 
+@app.post("/api/predictions/validate")
+def validate_proposal(payload: dict):
+    """
+    Mechanical rule-checker for prediction proposals (the openclaw rulebook, encoded).
+    Openclaw calls this BEFORE showing kf a proposal — kf's audit then covers judgment
+    only (thesis quality, regime honesty), not arithmetic.
+
+    Body: {"predictions": [{"symbol", "direction", "confidence", "entry", "target",
+                             "stop", "timeframe"}, ...]}
+    Returns per-prediction violations + batch-level warnings.
+    """
+    from services.prediction_service import classify_leverage
+    from services.morning_brief_engine import get_cluster_for
+    from core.database import SessionLocal, Prediction
+
+    preds = payload.get("predictions", [])
+    if not preds:
+        raise HTTPException(status_code=400, detail="predictions list required")
+
+    # Active predictions for cluster-conflict checks
+    db = SessionLocal()
+    try:
+        active = db.query(Prediction).filter(Prediction.outcome.is_(None)).all()
+        active_clusters = {get_cluster_for(p.symbol): p.symbol for p in active if get_cluster_for(p.symbol)}
+        active_symbols = {p.symbol for p in active}
+    finally:
+        db.close()
+
+    results, batch_clusters, up_count = [], {}, 0
+    for i, p in enumerate(preds):
+        v = []  # violations
+        sym = (p.get("symbol") or "").upper().strip()
+        direction = (p.get("direction") or "").upper().strip()
+        conf = float(p.get("confidence") or 0)
+        entry, target, stop = p.get("entry"), p.get("target"), p.get("stop")
+        tf = p.get("timeframe")
+        lev = classify_leverage(sym)
+        cluster = get_cluster_for(sym)
+
+        # Rule: leverage conviction gate
+        if not lev.startswith("1x") and conf < 60:
+            v.append(f"LEVERAGE GATE: {sym} is {lev} — requires >=60% conviction, got {conf:.0f}%")
+        # Rule: confidence bounds
+        if conf and not (45 <= conf <= 85):
+            v.append(f"CONFIDENCE: {conf:.0f}% outside sane range 45-85")
+        # Rule: timeframe 1-3
+        if tf is not None and int(tf) not in (1, 2, 3):
+            v.append(f"TIMEFRAME: {tf} not in 1-3")
+        # Rules: stop/target direction + R:R (computed server-side — no self-math errors)
+        rr = None
+        if entry and target and stop and direction in ("UP", "DOWN"):
+            entry, target, stop = float(entry), float(target), float(stop)
+            if direction == "UP":
+                if stop >= entry: v.append(f"STOP DIRECTION: LONG stop {stop} must be BELOW entry {entry}")
+                if target <= entry: v.append(f"TARGET DIRECTION: LONG target {target} must be ABOVE entry {entry}")
+                if stop < entry < target:
+                    rr = round((target - entry) / (entry - stop), 2)
+            else:
+                if stop <= entry: v.append(f"STOP DIRECTION: SHORT stop {stop} must be ABOVE entry {entry}")
+                if target >= entry: v.append(f"TARGET DIRECTION: SHORT target {target} must be BELOW entry {entry}")
+                if target < entry < stop:
+                    rr = round((entry - target) / (stop - entry), 2)
+            if rr is not None and rr < 1.2:
+                v.append(f"R:R FLOOR: {rr}:1 below 1.2:1 minimum")
+        # Rule: cluster conflict vs active book
+        if cluster and cluster in active_clusters:
+            v.append(f"CLUSTER CONFLICT: {cluster} already occupied by active {active_clusters[cluster]}")
+        if sym in active_symbols:
+            v.append(f"DUPLICATE: {sym} already has an active prediction")
+        # Rule: cluster conflict within this batch
+        if cluster:
+            if cluster in batch_clusters:
+                v.append(f"BATCH CLUSTER CONFLICT: {cluster} already used by {batch_clusters[cluster]} in this proposal")
+            else:
+                batch_clusters[cluster] = sym
+        if direction == "UP":
+            up_count += 1
+        results.append({"symbol": sym, "leverage_class": lev, "cluster": cluster,
+                        "rr_computed": rr, "violations": v, "passed": not v})
+
+    warnings = []
+    if up_count > 3:
+        warnings.append(f"CORRELATION: {up_count} UP bets in one batch — max 2-3 correlated longs per book (weekend 1/6 lesson)")
+
+    return {"predictions": results,
+            "batch_warnings": warnings,
+            "all_passed": all(r["passed"] for r in results) and not warnings}
+
+
 @app.post("/api/predictions/{prediction_id}/cancel")
 def cancel_prediction(prediction_id: int, payload: dict = None):
     """
