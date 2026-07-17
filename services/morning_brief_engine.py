@@ -100,8 +100,9 @@ SECTOR_INHERITANCE = {
 class MorningBriefEngine:
     LOG_DIR = Path("/Users/admin/moopredict-ai/data/morning_briefs")
 
-    def generate_brief(self, target_date: Optional[date] = None) -> Dict:
-        """Build brief for target_date (default: today UTC). Returns dict + writes markdown."""
+    def generate_brief(self, target_date: Optional[date] = None, write_file: bool = True) -> Dict:
+        """Build brief for target_date (default: today UTC). Returns dict + writes markdown
+        (unless write_file=False, e.g. when the auto-drafter just needs fresh scores)."""
         target_date = target_date or datetime.utcnow().date()
         cutoff = datetime.utcnow() - timedelta(hours=24)
 
@@ -178,14 +179,16 @@ class MorningBriefEngine:
             },
         }
 
-        # Write markdown
-        try:
-            self.LOG_DIR.mkdir(parents=True, exist_ok=True)
-            md = self._render_markdown(result)
-            (self.LOG_DIR / f"{target_date.isoformat()}.md").write_text(md)
-            result["markdown_path"] = str(self.LOG_DIR / f"{target_date.isoformat()}.md")
-        except Exception as e:
-            logger.error(f"[MorningBrief] Failed to write markdown: {e}")
+        # Write markdown (skipped when write_file=False — e.g. auto-drafter fetching
+        # fresh pre-market scores without clobbering the 08:00 morning brief)
+        if write_file:
+            try:
+                self.LOG_DIR.mkdir(parents=True, exist_ok=True)
+                md = self._render_markdown(result)
+                (self.LOG_DIR / f"{target_date.isoformat()}.md").write_text(md)
+                result["markdown_path"] = str(self.LOG_DIR / f"{target_date.isoformat()}.md")
+            except Exception as e:
+                logger.error(f"[MorningBrief] Failed to write markdown: {e}")
 
         logger.info(f"[MorningBrief] Generated for {target_date.isoformat()}: {len(top5)} top ETFs, regime={regime['label']}")
         return result

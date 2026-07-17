@@ -1067,6 +1067,13 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 )
             }
 
+        if command == "autodraft":
+            from services.auto_draft_engine import auto_draft_engine
+            res = auto_draft_engine.generate_daily_draft()
+            if res.get("success"):
+                return {"content": f"🤖 *Auto-Draft posted* — #{res['prediction_id']} @ entry {res.get('entry_price')}"}
+            return {"content": f"⚠️ Auto-Draft failed: {res.get('error')}"}
+
         if command == "news":
             from services.news_scraper import news_scraper
             count = news_scraper.run()

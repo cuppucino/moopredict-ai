@@ -275,12 +275,41 @@ class Scheduler:
         # 1. Premarket Sweep (12:00 UTC, Mon-Fri)
         self.scheduler.add_job(
             _run_job_with_timeout(lambda: openclaw_service.trigger_agent(
-                "premarket", 
-                "Perform the daily pre-market sweep and check news catalysts."
+                "premarket",
+                "Run the daily pre-market sweep using today's morning brief and current news catalysts. "
+                "Post AT LEAST ONE prediction EVERY day — your single best setup — even on weak days. This is a "
+                "paper experiment: every prediction is free data, so we never skip a day. "
+                "For each: FIRST validate via POST /api/predictions/validate, THEN create it via POST /api/predictions. "
+                "Tag every prediction with your HONEST conviction (high / medium / low via the confidence field). On a "
+                "weak day, post your best pick tagged LOW conviction — do NOT inflate conviction to justify posting it. "
+                "Post MORE than one only when multiple setups genuinely clear high conviction. "
+                "A prediction exists ONLY when it is in the system database — memory or journal entries do NOT count. "
+                "Do not assign prediction IDs yourself (the system assigns them). Do not resolve predictions yourself "
+                "(the resolver does that)."
             ), 180.0),
             CronTrigger.from_crontab("0 12 * * mon-fri", timezone=pytz.utc),
             id="openclaw_premarket_sweep",
             max_instances=2
+        )
+
+        # 1b. Auto-Draft — deterministic daily prediction (12:15 UTC = 20:15 MYT, Mon-Fri).
+        # Runs 15 min after openclaw's sweep so the agent gets first crack; then the
+        # system GUARANTEES at least one real prediction/day from the brief's best setup.
+        # openclaw proved unreliable at actually POSTing (journals fabricated ledgers
+        # instead — see services/auto_draft_engine.py), so execution moves to the system;
+        # openclaw's role shrinks to reviewing/adjusting. Tagged [AUTO_DRAFT] for Phase 7.
+        def _run_auto_draft():
+            from services.auto_draft_engine import auto_draft_engine
+            try:
+                auto_draft_engine.generate_daily_draft()
+            except Exception as e:
+                logger.error(f"[Scheduler] Auto-draft failed: {e}")
+        self.scheduler.add_job(
+            _run_auto_draft,
+            CronTrigger.from_crontab("15 12 * * mon-fri", timezone=pytz.utc),
+            id="auto_draft_job",
+            max_instances=1,
+            replace_existing=True,
         )
 
         # 2. Intra-day Decision/Monitor Cycle (Every 30 minutes, 13:00 to 20:30 UTC, Mon-Fri)
