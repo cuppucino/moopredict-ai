@@ -56,15 +56,30 @@ class Scheduler:
 
         logger.info("[Scheduler] Initializing Python cron jobs...")
 
-        # Moomoo background reconnect — runs every 5 min. Two failure modes:
-        #   1) Hard disconnect: startup connect timed out (OpenD down). Reconnect
-        #      when OpenD recovers.
-        #   2) Silent stale: socket reports connected but the quote stream is dead
-        #      (observed 2026-07-09 — 25h stale while is_connected=True). The old
-        #      tick only handled (1), so a wedged subscription rode uncorrected.
-        #      During US market hours, if quotes are stale we force a full
-        #      close()+connect() to rebuild the quote_ctx subscription.
+        # Moomoo background reconnect — runs every 5 min, ALL hours. Two failure modes:
+        #   1) Hard disconnect (is_connected=False): reconnect.
+        #   2) Silent wedge: socket reports connected but the stream is dead (RemoteClose
+        #      leaves is_connected=True — observed 2026-07-09 stale 25h, and 2026-07-18
+        #      wedged all weekend). We ACTIVELY probe a canary quote and rebuild if it fails.
+        # The probe runs ALL hours (not just market hours): moomoo returns last close when
+        # closed, so a weekend wedge otherwise rides uncorrected until Monday AND every
+        # blocking moomoo call (hourly heartbeat's get_positions/get_balance) piles up on the
+        # dead connection with no timeout, starving the HTTP threadpool until /api/health
+        # itself hangs. The probe is wrapped in an 8s timeout so a wedged connection fails
+        # FAST and self-heals within one tick instead of hanging a thread.
+        def _probe_quote_with_timeout(timeout_s: float = 8.0) -> bool:
+            import concurrent.futures
+            from services.moomoo_service import moomoo_service
+            ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            fut = ex.submit(moomoo_service.get_stock_quote, "SPY")
+            try:
+                q = fut.result(timeout=timeout_s)
+                return bool(q and q.get("last_price", 0) > 0)
+            finally:
+                ex.shutdown(wait=False)  # never block on a hung SDK call
+
         def _moomoo_reconnect_tick():
+            import concurrent.futures
             from services.moomoo_service import moomoo_service
             if not moomoo_service.is_connected:
                 logger.info("[Scheduler] Moomoo disconnected — attempting background reconnect...")
@@ -76,43 +91,28 @@ class Scheduler:
                     logger.warning(f"[Scheduler] Moomoo reconnect attempt failed: {e}")
                 return
 
-            # Connected — actively probe the quote stream during market hours. A passive
-            # freshness read is useless here: nothing else in-process fetches quotes
-            # (klines replaced them), so the metric sits at the never-updated sentinel
-            # (999999) and an age>threshold test would fire an endless reconnect storm
-            # (observed 2026-07-09: 18 needless reconnects in 90 min). Instead we fetch a
-            # canary quote: success both proves the stream is alive AND re-stamps freshness;
-            # only a failed probe (genuinely wedged subscription) forces a rebuild.
-            now = datetime.now(pytz.utc)
-            # US regular session in July (EDT, UTC-4): 13:30–20:00 UTC, Mon–Fri.
-            market_open = (
-                now.weekday() < 5
-                and (now.hour, now.minute) >= (13, 30)
-                and now.hour < 20
-            )
-            if not market_open:
-                return
+            # Connected — actively verify with a timeout-bounded canary quote. Success
+            # re-stamps freshness (inside get_stock_quote); a failed/timed-out probe means
+            # a wedged connection -> full close()+connect() rebuild.
             try:
-                q = moomoo_service.get_stock_quote("SPY")
-                healthy = bool(q and q.get("last_price", 0) > 0)
+                healthy = _probe_quote_with_timeout(8.0)
+            except concurrent.futures.TimeoutError:
+                logger.warning("[Scheduler] Moomoo quote probe TIMED OUT (wedged connection) — forcing rebuild.")
+                healthy = False
             except Exception as e:
-                logger.warning(f"[Scheduler] Moomoo quote probe errored: {e}")
+                logger.warning(f"[Scheduler] Moomoo quote probe errored: {e} — forcing rebuild.")
                 healthy = False
             if healthy:
-                return  # stream alive; freshness stamped inside get_stock_quote
-            logger.warning(
-                "[Scheduler] Moomoo quote probe (SPY) returned no price during market "
-                "hours — forcing full reconnect."
-            )
+                return
             try:
                 moomoo_service.close()
                 ok = moomoo_service.connect()
                 if ok:
-                    logger.success("[Scheduler] Moomoo stale-quote reconnect succeeded.")
+                    logger.success("[Scheduler] Moomoo wedged-connection rebuild succeeded.")
                 else:
-                    logger.warning("[Scheduler] Moomoo stale-quote reconnect failed.")
+                    logger.warning("[Scheduler] Moomoo wedged-connection rebuild failed.")
             except Exception as e:
-                logger.warning(f"[Scheduler] Moomoo stale-quote reconnect error: {e}")
+                logger.warning(f"[Scheduler] Moomoo wedged-connection rebuild error: {e}")
         self.scheduler.add_job(
             _moomoo_reconnect_tick,
             CronTrigger.from_crontab("*/5 * * * *", timezone=pytz.utc),

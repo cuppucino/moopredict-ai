@@ -151,18 +151,30 @@ class HeartbeatMonitor:
     def check_earnings_proximity(self):
         """Check for earnings reports within the warning window (3 days)."""
         logger.info("[Heartbeat] Checking earnings proximity...")
+        # Pull the watchlist and RELEASE the pooled DB connection immediately. The rest of
+        # this method makes blocking moomoo + earnings-API calls; holding a session across
+        # them pins the connection for the whole call, and a wedged moomoo (no call timeout)
+        # pins it indefinitely — that's how the pool exhausted over the 2026-07-18 weekend
+        # (QueuePool limit 50 reached -> /api/health & /api/track-record hung 30s+).
         db = SessionLocal()
         try:
-            watchlist = db.query(UserWatchlist).all()
-            symbols = [s.symbol for s in watchlist]
-            
-            # Also check held positions
+            symbols = [s.symbol for s in db.query(UserWatchlist).all()]
+        except Exception as e:
+            logger.error(f"[Heartbeat] Earnings watchlist query error: {e}")
+            symbols = []
+        finally:
+            db.close()
+
+        try:
+            # Also check held positions (blocking moomoo call — now outside any DB session)
             positions = moomoo_service.get_positions()
             for p in positions:
                 if p["symbol"] not in symbols:
                     symbols.append(p["symbol"])
-            
-            
+        except Exception as e:
+            logger.warning(f"[Heartbeat] Earnings position fetch skipped: {e}")
+
+        try:
             for symbol in symbols:
                 earnings = earnings_service.get_stock_earnings(symbol)
                 if earnings.get("success") and earnings.get("earnings_dates"):
