@@ -141,6 +141,10 @@ class Scheduler:
             CronTrigger.from_crontab("0 0 * * mon-fri", timezone=pytz.utc),
             id="morning_brief_job",
             max_instances=1,
+            # Lid-close sleep can make the Mac miss 08:00 MYT by hours (2026-07-20: missed
+            # by 1:47 > default 1h grace -> skipped to next day). A late brief is far better
+            # than none — allow firing up to 6h late on wake.
+            misfire_grace_time=6 * 3600,
             replace_existing=True,
         )
 
@@ -168,6 +172,7 @@ class Scheduler:
             CronTrigger.from_crontab("5 0 * * mon-fri", timezone=pytz.utc),
             id="brief_push_openclaw_job",
             max_instances=1,
+            misfire_grace_time=6 * 3600,  # late push still useful (see morning_brief_job)
             replace_existing=True,
         )
 
@@ -289,7 +294,10 @@ class Scheduler:
             ), 180.0),
             CronTrigger.from_crontab("0 12 * * mon-fri", timezone=pytz.utc),
             id="openclaw_premarket_sweep",
-            max_instances=2
+            max_instances=2,
+            # US session runs 13:30-20:00 UTC — a sweep fired up to 4h late (16:15 UTC)
+            # is still mid-session and valuable; beyond that, skip to tomorrow.
+            misfire_grace_time=4 * 3600,
         )
 
         # 1b. Auto-Draft — deterministic daily prediction (12:15 UTC = 20:15 MYT, Mon-Fri).
@@ -309,6 +317,7 @@ class Scheduler:
             CronTrigger.from_crontab("15 12 * * mon-fri", timezone=pytz.utc),
             id="auto_draft_job",
             max_instances=1,
+            misfire_grace_time=4 * 3600,  # late daily draft still lands mid-session (see sweep)
             replace_existing=True,
         )
 
