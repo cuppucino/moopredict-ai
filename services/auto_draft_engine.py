@@ -34,6 +34,29 @@ def _confidence_from_score(score: float):
     return 42.0, "LOW"
 
 
+# --- Phase 7 tilts (n=30, 2026-07-21). Modest & PROVISIONAL — buckets are ~n10.
+# The auto-draft still posts daily; these only bias toward the conditions that have
+# worked so far, and get re-checked as n grows. See PHASE7_RESULTS_2026-07-21.txt.
+def _class_bonus(symbol: str) -> float:
+    """Selection tilt by leverage class: sector ETFs carried WR 40%/PF 7.3; broad-index
+    was 17% and thematic PF 0.28. Prefer sector, penalize the weak classes."""
+    try:
+        from services.prediction_service import classify_leverage
+        lev = classify_leverage(symbol)
+    except Exception:
+        return 0.0
+    return {"1x_sector": 15.0, "1x_index_broad": -12.0, "1x_thematic": -6.0}.get(lev, 0.0)
+
+
+def _regime_adjust(confidence: float, tier: str, regime: str):
+    """Conviction tilt by regime: CHOP was 60% WR, trends ~0%. Dampen conviction one
+    tier in trend regimes (we can't ride trends yet)."""
+    if regime in ("TREND_UP", "TREND_DOWN"):
+        return {"HIGH": (52.0, "MEDIUM"), "MEDIUM": (42.0, "LOW"), "LOW": (42.0, "LOW")}.get(
+            tier, (confidence, tier))
+    return confidence, tier
+
+
 class AutoDraftEngine:
     def generate_daily_draft(self) -> Dict:
         """Post AT LEAST ONE real prediction to the database from the day's best
@@ -55,12 +78,16 @@ class AutoDraftEngine:
             logger.warning("[AutoDraft] brief returned no ETFs — cannot draft today")
             return {"success": False, "error": "empty brief"}
 
-        # Prefer the highest-scored setup with a real directional lean.
-        pick = next((e for e in top5 if e.get("direction_lean") in ("UP", "DOWN")), None)
-        if pick is not None:
+        # Rank candidates by Phase-7-adjusted score (raw brief score + class tilt), not raw
+        # score alone — so a sector ETF is preferred over a broad-index one at similar score.
+        # Conviction is then dampened in trend regimes. Weights are provisional (see helpers).
+        directional = [e for e in top5 if e.get("direction_lean") in ("UP", "DOWN")]
+        if directional:
+            pick = max(directional, key=lambda e: (e.get("score", 0) or 0) + _class_bonus(e["ticker"]))
             direction = pick["direction_lean"]
             score = pick.get("score", 0) or 0
             confidence, tier = _confidence_from_score(score)
+            confidence, tier = _regime_adjust(confidence, tier, regime)
         else:
             # Everything NEUTRAL — still guarantee a post. Take rank #1, derive a
             # direction from regime, tag LOW (there is no genuine directional signal).
