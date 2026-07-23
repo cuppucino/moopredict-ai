@@ -100,6 +100,27 @@ SECTOR_INHERITANCE = {
 class MorningBriefEngine:
     LOG_DIR = Path("/Users/admin/moopredict-ai/data/morning_briefs")
 
+    def score_symbols(self, symbols: list) -> Dict:
+        """Score arbitrary tickers (e.g. the user's held positions) with the SAME 24h news +
+        VIP-sentiment + structure pipeline the morning brief uses. Returns {symbol: score_dict}.
+        Reused by the position-watch engine so held stocks are analyzed identically to ETFs."""
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        db = SessionLocal()
+        try:
+            news = db.query(NewsIntel).filter(NewsIntel.scraped_at >= cutoff).all()
+            social = db.query(SocialPost).filter(
+                SocialPost.scraped_at >= cutoff, SocialPost.author.isnot(None)).all()
+        finally:
+            db.close()
+        vip_social = []
+        for s in social:
+            handle = ((s.author or "").strip().lstrip("@").split() or [""])[0]
+            if get_tier(handle) != "UNKNOWN":
+                vip_social.append({"handle": handle, "tier": get_tier(handle), "content": s.content,
+                                   "posted_at": s.posted_at or s.scraped_at,
+                                   "sentiment": _get_sentiment(s.content or "")})
+        return {sym: self._score_etf(sym, news, vip_social) for sym in symbols}
+
     def generate_brief(self, target_date: Optional[date] = None, write_file: bool = True) -> Dict:
         """Build brief for target_date (default: today UTC). Returns dict + writes markdown
         (unless write_file=False, e.g. when the auto-drafter just needs fresh scores)."""

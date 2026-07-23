@@ -1075,6 +1075,14 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"content": f"🤖 *Auto-Draft* — posted {res.get('posted')} prediction(s): {ids}"}
             return {"content": f"⚠️ Auto-Draft failed: {res.get('error')}"}
 
+        if command == "positionwatch":
+            from services.position_watch_engine import position_watch_engine
+            res = position_watch_engine.generate_daily()
+            if res.get("success"):
+                ids = ", ".join(f"#{i}" for i in res.get("ids", []))
+                return {"content": f"👁️ *Position-Watch* — {res.get('posted')} on {', '.join(res.get('symbols', []))}: {ids}"}
+            return {"content": f"⚠️ Position-Watch failed: {res.get('error') or res.get('note')}"}
+
         if command == "news":
             from services.news_scraper import news_scraper
             count = news_scraper.run()

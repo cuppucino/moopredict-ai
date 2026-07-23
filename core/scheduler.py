@@ -318,6 +318,23 @@ class Scheduler:
             id="auto_draft_job",
             max_instances=1,
             misfire_grace_time=4 * 3600,  # late daily draft still lands mid-session (see sweep)
+        )
+
+        # 1c. Position-Watch — daily prediction on the user's ACTUAL held positions
+        # (12:20 UTC = 20:20 MYT). Deterministic, scoped to moomoo positions, tagged
+        # [POSITION_WATCH] as its own track. See services/position_watch_engine.py.
+        def _run_position_watch():
+            from services.position_watch_engine import position_watch_engine
+            try:
+                position_watch_engine.generate_daily()
+            except Exception as e:
+                logger.error(f"[Scheduler] Position-watch failed: {e}")
+        self.scheduler.add_job(
+            _run_position_watch,
+            CronTrigger.from_crontab("20 12 * * mon-fri", timezone=pytz.utc),
+            id="position_watch_job",
+            max_instances=1,
+            misfire_grace_time=4 * 3600,
             replace_existing=True,
         )
 
