@@ -15,12 +15,17 @@ deterministic baseline from openclaw's discretionary posts (when it does post).
 from typing import Dict
 from loguru import logger
 
-from services.morning_brief_engine import morning_brief_engine
+from services.morning_brief_engine import morning_brief_engine, get_cluster_for
 from services.prediction_service import prediction_service
 
 # Marker embedded in the catalyst string so the deterministic baseline is
 # separable from openclaw's discretionary predictions in Phase 7 analysis.
 AUTO_TAG = "[AUTO_DRAFT]"
+
+# How many predictions to post per day. >1 speeds data velocity toward the next
+# analysis checkpoint, but picks are chosen DIVERSIFIED across underlying clusters —
+# 3 correlated bets (all tech-UP) aren't worth 3x the independent signal.
+MAX_DRAFTS = 3
 
 
 def _confidence_from_score(score: float):
@@ -58,13 +63,65 @@ def _regime_adjust(confidence: float, tier: str, regime: str):
 
 
 class AutoDraftEngine:
-    def generate_daily_draft(self) -> Dict:
-        """Post AT LEAST ONE real prediction to the database from the day's best
-        brief setup. Guaranteed — this is the reliable baseline openclaw can't provide.
+    def _select_diversified(self, brief: Dict, regime: str, n: int):
+        """Pick up to n directional setups, ranked by Phase-7-adjusted score, at most
+        ONE per underlying cluster (so we don't post 3 copies of the same bet). Returns a
+        list of dicts: symbol, direction, score, confidence, tier. Falls back to a single
+        regime-derived LOW-conviction pick if nothing has a real directional lean."""
+        # Consider the whole universe, not just top5 — more room to diversify.
+        scores = brief.get("all_scores") or {}
+        cands = [{"ticker": t, **v} for t, v in scores.items()] if scores else list(brief.get("top5", []))
+        directional = [c for c in cands if c.get("direction_lean") in ("UP", "DOWN")]
 
-        Selection: highest-scored ETF whose news-driven direction_lean is not NEUTRAL.
-        If every top pick is NEUTRAL, fall back to rank #1 with a regime-derived
-        direction, tagged LOW conviction (no real directional signal)."""
+        if not directional:
+            # Everything NEUTRAL — still guarantee ONE post from rank #1.
+            top = brief.get("top5") or []
+            if not top:
+                return []
+            return [{"ticker": top[0]["ticker"],
+                     "direction": "DOWN" if regime == "TREND_DOWN" else "UP",
+                     "score": top[0].get("score", 0) or 0, "confidence": 42.0, "tier": "LOW"}]
+
+        directional.sort(key=lambda c: (c.get("score", 0) or 0) + _class_bonus(c["ticker"]), reverse=True)
+
+        picks, seen_clusters = [], set()
+        for c in directional:
+            # One per cluster; tickers not in any cluster get a unique key (all eligible).
+            key = get_cluster_for(c["ticker"]) or c["ticker"]
+            if key in seen_clusters:
+                continue
+            seen_clusters.add(key)
+            score = c.get("score", 0) or 0
+            conf, tier = _regime_adjust(*_confidence_from_score(score), regime)
+            picks.append({"ticker": c["ticker"], "direction": c["direction_lean"],
+                          "score": score, "confidence": conf, "tier": tier})
+            if len(picks) >= n:
+                break
+        return picks
+
+    def _post_one(self, p: dict, regime: str) -> Dict:
+        catalyst = (
+            f"{AUTO_TAG} deterministic daily baseline — brief pick {p['ticker']}, "
+            f"score={p['score']}, regime={regime}, conviction={p['tier']}. openclaw may review/adjust."
+        )
+        kw = dict(symbol=p["ticker"], direction=p["direction"], confidence=p["confidence"],
+                  catalyst=catalyst, category="auto_draft", timeframe_days=1, prediction_tag="TA_ONLY")
+        res = prediction_service.create_prediction(force=False, **kw)
+        if not res.get("success"):
+            logger.info(f"[AutoDraft] {p['ticker']} rejected by safety ({res.get('error')}) — forcing")
+            res = prediction_service.create_prediction(force=True, **kw)
+        if res.get("success"):
+            logger.success(f"[AutoDraft] posted #{res['prediction_id']} {p['ticker']} {p['direction']} "
+                           f"conf={p['confidence']} tier={p['tier']} entry={res.get('entry_price')}")
+        else:
+            logger.error(f"[AutoDraft] FAILED to post {p['ticker']}: {res.get('error')}")
+        return res
+
+    def generate_daily_draft(self) -> Dict:
+        """Post up to MAX_DRAFTS diversified predictions/day (>=1 guaranteed). This is the
+        reliable deterministic baseline openclaw can't provide. Picks are chosen by
+        Phase-7-adjusted score, at most one per underlying cluster, conviction tagged
+        honestly (regime-dampened in trends). Tagged [AUTO_DRAFT] for Phase 7 separation."""
         # Fresh pre-market scores; write_file=False so we don't clobber the 08:00 brief.
         try:
             brief = morning_brief_engine.generate_brief(write_file=False)
@@ -72,70 +129,18 @@ class AutoDraftEngine:
             logger.error(f"[AutoDraft] brief generation failed: {e}")
             return {"success": False, "error": f"brief failed: {e}"}
 
-        top5 = brief.get("top5", [])
         regime = brief.get("regime", {}).get("label", "CHOP")
-        if not top5:
-            logger.warning("[AutoDraft] brief returned no ETFs — cannot draft today")
+        picks = self._select_diversified(brief, regime, MAX_DRAFTS)
+        if not picks:
+            logger.warning("[AutoDraft] brief returned no candidates — cannot draft today")
             return {"success": False, "error": "empty brief"}
 
-        # Rank candidates by Phase-7-adjusted score (raw brief score + class tilt), not raw
-        # score alone — so a sector ETF is preferred over a broad-index one at similar score.
-        # Conviction is then dampened in trend regimes. Weights are provisional (see helpers).
-        directional = [e for e in top5 if e.get("direction_lean") in ("UP", "DOWN")]
-        if directional:
-            pick = max(directional, key=lambda e: (e.get("score", 0) or 0) + _class_bonus(e["ticker"]))
-            direction = pick["direction_lean"]
-            score = pick.get("score", 0) or 0
-            confidence, tier = _confidence_from_score(score)
-            confidence, tier = _regime_adjust(confidence, tier, regime)
-        else:
-            # Everything NEUTRAL — still guarantee a post. Take rank #1, derive a
-            # direction from regime, tag LOW (there is no genuine directional signal).
-            pick = top5[0]
-            direction = "DOWN" if regime == "TREND_DOWN" else "UP"
-            score = pick.get("score", 0) or 0
-            confidence, tier = 42.0, "LOW"
-
-        symbol = pick["ticker"]
-        catalyst = (
-            f"{AUTO_TAG} deterministic daily baseline — brief pick {symbol}, "
-            f"score={score}, lean={pick.get('direction_lean')}, regime={regime}, "
-            f"conviction={tier}. openclaw may review/adjust."
-        )
-
-        # Try clean first (respects cluster/duplicate safety); if that rejects,
-        # force so the daily post is still guaranteed.
-        res = prediction_service.create_prediction(
-            symbol=symbol,
-            direction=direction,
-            confidence=confidence,
-            catalyst=catalyst,
-            category="auto_draft",
-            timeframe_days=1,
-            prediction_tag="TA_ONLY",
-            force=False,
-        )
-        if not res.get("success"):
-            logger.info(f"[AutoDraft] {symbol} rejected by safety ({res.get('error')}) — forcing to guarantee daily post")
-            res = prediction_service.create_prediction(
-                symbol=symbol,
-                direction=direction,
-                confidence=confidence,
-                catalyst=catalyst,
-                category="auto_draft",
-                timeframe_days=1,
-                prediction_tag="TA_ONLY",
-                force=True,
-            )
-
-        if res.get("success"):
-            logger.success(
-                f"[AutoDraft] posted #{res['prediction_id']} {symbol} {direction} "
-                f"conf={confidence} tier={tier} score={score} entry={res.get('entry_price')}"
-            )
-        else:
-            logger.error(f"[AutoDraft] FAILED to post daily draft for {symbol}: {res.get('error')}")
-        return res
+        results = [self._post_one(p, regime) for p in picks]
+        posted = [r for r in results if r.get("success")]
+        logger.info(f"[AutoDraft] daily run complete — {len(posted)}/{len(picks)} posted "
+                    f"({', '.join(p['ticker'] for p in picks)})")
+        return {"success": bool(posted), "posted": len(posted),
+                "ids": [r.get("prediction_id") for r in posted]}
 
 
 auto_draft_engine = AutoDraftEngine()

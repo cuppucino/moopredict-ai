@@ -1071,7 +1071,8 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
             from services.auto_draft_engine import auto_draft_engine
             res = auto_draft_engine.generate_daily_draft()
             if res.get("success"):
-                return {"content": f"🤖 *Auto-Draft posted* — #{res['prediction_id']} @ entry {res.get('entry_price')}"}
+                ids = ", ".join(f"#{i}" for i in res.get("ids", []))
+                return {"content": f"🤖 *Auto-Draft* — posted {res.get('posted')} prediction(s): {ids}"}
             return {"content": f"⚠️ Auto-Draft failed: {res.get('error')}"}
 
         if command == "news":
