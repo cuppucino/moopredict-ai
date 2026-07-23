@@ -43,14 +43,21 @@ class PositionWatchEngine:
             return None
         if not s or s.get("error"):
             return None
+        # 1) Capitulation (rare, strong): down-panic -> mean-reversion UP, blow-off -> DOWN.
         cap = s.get("capitulation", {}) or {}
         if cap.get("detected"):
             return "UP" if cap.get("type") == "down_capitulation" else "DOWN"
+        # 2) Break of structure (rare): trend confirmation.
         bos = s.get("bos", {}) or {}
         if bos.get("direction") == "bullish":
             return "UP"
         if bos.get("direction") == "bearish":
             return "DOWN"
+        # 3) Everyday trend read (almost always available): the recent-swing direction, so
+        #    each holding gets a real technical lean instead of falling back to regime-default.
+        fib = s.get("fib", {}) or {}
+        if fib.get("available") and fib.get("direction") in ("up", "down"):
+            return "UP" if fib["direction"] == "up" else "DOWN"
         return None
 
     def generate_daily(self) -> Dict:
