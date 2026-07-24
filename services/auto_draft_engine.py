@@ -53,6 +53,31 @@ def _class_bonus(symbol: str) -> float:
     return {"1x_sector": 15.0, "1x_index_broad": -12.0, "1x_thematic": -6.0}.get(lev, 0.0)
 
 
+# Skip a leveraged single-stock ETF if its UNDERLYING reports within this many days —
+# the underlying's earnings gap hits the ETF (leveraged, harder). 2026-07-24: GGLL (2x GOOGL)
+# lost -14.4% on GOOGL's earnings drop; this gate would have skipped it.
+EARNINGS_BLACKOUT_DAYS = 3
+
+
+def _underlying_earnings_days(symbol: str):
+    """For a leveraged single-stock ETF, days until its UNDERLYING stock reports (else None).
+    Baskets/sector ETFs return None — they don't gap on one company's earnings."""
+    from services.morning_brief_engine import get_cluster_for
+    cluster = get_cluster_for(symbol)
+    if not cluster or not cluster.endswith("_STOCK"):
+        return None
+    underlying = cluster[:-len("_STOCK")]
+    try:
+        from datetime import datetime
+        from services.earnings_calendar import earnings_service
+        dates = (earnings_service.get_stock_earnings(underlying) or {}).get("earnings_dates") or []
+        if dates:
+            return (datetime.strptime(str(dates[0])[:10], "%Y-%m-%d") - datetime.utcnow()).days
+    except Exception:
+        pass
+    return None
+
+
 def _regime_adjust(confidence: float, tier: str, regime: str):
     """Conviction tilt by regime: CHOP was 60% WR, trends ~0%. Dampen conviction one
     tier in trend regimes (we can't ride trends yet)."""
@@ -86,6 +111,11 @@ class AutoDraftEngine:
 
         picks, seen_clusters = [], set()
         for c in directional:
+            # Earnings gate: skip a leveraged single-stock ETF if its underlying reports soon.
+            ed = _underlying_earnings_days(c["ticker"])
+            if ed is not None and 0 <= ed <= EARNINGS_BLACKOUT_DAYS:
+                logger.info(f"[AutoDraft] {c['ticker']} skipped — underlying earnings in {ed}d (blackout)")
+                continue
             # One per cluster; tickers not in any cluster get a unique key (all eligible).
             key = get_cluster_for(c["ticker"]) or c["ticker"]
             if key in seen_clusters:
