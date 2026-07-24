@@ -79,6 +79,13 @@ class PositionWatchEngine:
         except Exception as e:
             logger.error(f"[PositionWatch] scoring failed: {e}")
             return {"success": False, "error": f"scoring: {e}"}
+        # Position-intel: richer per-symbol sentiment (fed in so predictions stop starving).
+        try:
+            from services.position_intel_engine import position_intel_engine
+            intel = position_intel_engine.gather(symbols)
+        except Exception as e:
+            logger.warning(f"[PositionWatch] intel gather failed (continuing): {e}")
+            intel = {}
         regime = classify_regime()
 
         posted_ids = []
@@ -86,11 +93,17 @@ class PositionWatchEngine:
             sc = scores.get(sym, {}) or {}
             score = sc.get("score", 0) or 0
             lean = sc.get("direction_lean", "NEUTRAL")
-            # Direction priority: news lean -> structure/TA read -> regime fallback.
+            info = intel.get(sym, {}) or {}
+            senti = info.get("sentiment_score", 0.0) or 0.0
+            senti_n = info.get("sentiment_count", 0) or 0
+            # Direction priority: news lean -> position-intel sentiment -> structure/TA -> regime.
             if lean in ("UP", "DOWN"):
                 direction, source = lean, "news"
                 confidence = 52.0 if score >= 40 else 44.0
                 tier = "MEDIUM" if score >= 40 else "LOW"
+            elif senti_n >= 2 and abs(senti) >= 0.20:
+                direction = "UP" if senti > 0 else "DOWN"
+                source, confidence, tier = "sentiment", 48.0, "MEDIUM"
             else:
                 struct = self._structure_lean(sym)
                 if struct:

@@ -335,6 +335,23 @@ class Scheduler:
             id="position_watch_job",
             max_instances=1,
             misfire_grace_time=4 * 3600,
+        )
+
+        # 1d. Position-Intel — daily intelligence briefing on the user's held positions
+        # (12:18 UTC = 20:18 MYT, 2 min before position-watch). Gathers earnings / sentiment /
+        # matched news per holding -> data/position_intel/. See position_intel_engine.py.
+        def _run_position_intel():
+            from services.position_intel_engine import position_intel_engine
+            try:
+                position_intel_engine.generate_briefing()
+            except Exception as e:
+                logger.error(f"[Scheduler] Position-intel failed: {e}")
+        self.scheduler.add_job(
+            _run_position_intel,
+            CronTrigger.from_crontab("18 12 * * mon-fri", timezone=pytz.utc),
+            id="position_intel_job",
+            max_instances=1,
+            misfire_grace_time=4 * 3600,
             replace_existing=True,
         )
 

@@ -1083,6 +1083,19 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"content": f"👁️ *Position-Watch* — {res.get('posted')} on {', '.join(res.get('symbols', []))}: {ids}"}
             return {"content": f"⚠️ Position-Watch failed: {res.get('error') or res.get('note')}"}
 
+        if command == "positionintel":
+            from services.position_intel_engine import position_intel_engine
+            res = position_intel_engine.generate_briefing()
+            if not res.get("success"):
+                return {"content": f"⚠️ Position-Intel failed: {res.get('error') or res.get('note')}"}
+            intel = res.get("intel", {})
+            lines = ["🗞️ *Position Intel*"]
+            for s in res.get("symbols", []):
+                i = intel.get(s, {})
+                ed = f" · earnings {i['earnings_date']} ({i['earnings_days']}d)" if i.get("earnings_days") is not None else ""
+                lines.append(f"• *{s}*: {i.get('sentiment_label','?')} ({i.get('sentiment_score',0):+.2f}) · {i.get('news_count',0)} news{ed}")
+            return {"content": "\n".join(lines)}
+
         if command == "news":
             from services.news_scraper import news_scraper
             count = news_scraper.run()
