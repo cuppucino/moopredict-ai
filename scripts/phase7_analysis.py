@@ -132,9 +132,14 @@ def report(rows, cohort_label):
 def main():
     db = SessionLocal()
     try:
-        allrows = db.query(Prediction).filter(Prediction.outcome.in_(["RIGHT", "WRONG"])).all()
+        every = db.query(Prediction).filter(Prediction.outcome.in_(["RIGHT", "WRONG"])).all()
     finally:
         db.close()
+
+    # Split the informational position-watch track out of the ETF-experiment cohorts —
+    # single-stock reads on the user's holdings, measured on their own, never pooled.
+    poswatch = [p for p in every if p.category == "position_watch"]
+    allrows = [p for p in every if p.category != "position_watch"]
 
     cutoff = datetime.utcnow() - timedelta(days=30)
     win30 = [p for p in allrows if p.resolved_at and p.resolved_at >= cutoff]
@@ -147,6 +152,9 @@ def main():
     report(instrumented, "INSTRUMENTED ONLY (regime-stamped)")
     # Context = all-time.
     report(allrows, "ALL-TIME (context)")
+    # The informational position-watch track, measured entirely separately.
+    if poswatch:
+        report(poswatch, "POSITION-WATCH (informational, held stocks — separate)")
 
 
 if __name__ == "__main__":

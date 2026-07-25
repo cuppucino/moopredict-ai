@@ -29,10 +29,15 @@ def pct_pnl(p) -> float:
 def compute_metrics(session: Session) -> dict:
     """Compute win rate + profit factor + count over rolling 30d."""
     try:
+        from sqlalchemy import or_
         cutoff = datetime.utcnow() - timedelta(days=ROLLING_WINDOW_DAYS)
         resolved = session.query(Prediction).filter(
             Prediction.outcome.in_(["RIGHT", "WRONG"]),
             Prediction.created_at >= cutoff,
+            # Exclude the informational position-watch track (single-stock reads on the
+            # user's real holdings, explicitly NOT a trade signal) — it must not pollute
+            # the ETF experiment's headline edge. NULL category = legacy, keep.
+            or_(Prediction.category.is_(None), Prediction.category != "position_watch"),
         ).all()
 
         n = len(resolved)
