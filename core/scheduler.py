@@ -312,13 +312,14 @@ class Scheduler:
                 auto_draft_engine.generate_daily_draft()
             except Exception as e:
                 logger.error(f"[Scheduler] Auto-draft failed: {e}")
-        self.scheduler.add_job(
-            _run_auto_draft,
-            CronTrigger.from_crontab("15 12 * * mon-fri", timezone=pytz.utc),
-            id="auto_draft_job",
-            max_instances=1,
-            misfire_grace_time=4 * 3600,  # late daily draft still lands mid-session (see sweep)
-        )
+        # DISABLED 2026-07-28 — the broad 57-ETF auto-draft is superseded by the focused
+        # 4-ETF engine (backtest showed the broad/technical approach has no edge). Engine +
+        # webhook kept for reference/manual use; the daily cron no longer runs.
+        # self.scheduler.add_job(
+        #     _run_auto_draft,
+        #     CronTrigger.from_crontab("15 12 * * mon-fri", timezone=pytz.utc),
+        #     id="auto_draft_job", max_instances=1, misfire_grace_time=4 * 3600,
+        # )
 
         # 1a2. Focus — the PRIMARY approach now (12:14 UTC = 20:14 MYT). Info-first on 4 fixed
         # US ETFs (SPY/QQQ/SMH/XLE): news view + technical code -> confidence. Replaces the broad
@@ -346,13 +347,14 @@ class Scheduler:
                 selective_engine.generate()
             except Exception as e:
                 logger.error(f"[Scheduler] Selective failed: {e}")
-        self.scheduler.add_job(
-            _run_selective,
-            CronTrigger.from_crontab("16 12 * * mon-fri", timezone=pytz.utc),
-            id="selective_job",
-            max_instances=1,
-            misfire_grace_time=4 * 3600,
-        )
+        # DISABLED 2026-07-28 — selective (CHOP+sector gate) was built on the Phase-7 n=30
+        # signal that the backtest later disproved at n=1778. Superseded by the focus engine.
+        # Engine + webhook kept for reference; daily cron no longer runs.
+        # self.scheduler.add_job(
+        #     _run_selective,
+        #     CronTrigger.from_crontab("16 12 * * mon-fri", timezone=pytz.utc),
+        #     id="selective_job", max_instances=1, misfire_grace_time=4 * 3600,
+        # )
 
         # 1c. Position-Watch — daily prediction on the user's ACTUAL held positions
         # (12:20 UTC = 20:20 MYT). Deterministic, scoped to moomoo positions, tagged
