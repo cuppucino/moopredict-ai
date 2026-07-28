@@ -1075,6 +1075,16 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"content": f"🤖 *Auto-Draft* — posted {res.get('posted')} prediction(s): {ids}"}
             return {"content": f"⚠️ Auto-Draft failed: {res.get('error')}"}
 
+        if command == "focus":
+            from services.focus_engine import focus_engine
+            res = focus_engine.generate()
+            if not res.get("success"):
+                return {"content": "⚠️ Focus failed"}
+            lines = ["🎯 *Focus — 4 ETFs*"]
+            for r in res.get("results", []):
+                lines.append(f"• *{r['etf']}* → {r['direction']} @ {r['confidence']}%")
+            return {"content": "\n".join(lines)}
+
         if command == "selective":
             from services.selective_engine import selective_engine
             res = selective_engine.generate()

@@ -320,6 +320,23 @@ class Scheduler:
             misfire_grace_time=4 * 3600,  # late daily draft still lands mid-session (see sweep)
         )
 
+        # 1a2. Focus — the PRIMARY approach now (12:14 UTC = 20:14 MYT). Info-first on 4 fixed
+        # US ETFs (SPY/QQQ/SMH/XLE): news view + technical code -> confidence. Replaces the broad
+        # 57-ETF scan (backtest: no edge). See services/focus_engine.py.
+        def _run_focus():
+            from services.focus_engine import focus_engine
+            try:
+                focus_engine.generate()
+            except Exception as e:
+                logger.error(f"[Scheduler] Focus failed: {e}")
+        self.scheduler.add_job(
+            _run_focus,
+            CronTrigger.from_crontab("14 12 * * mon-fri", timezone=pytz.utc),
+            id="focus_job",
+            max_instances=1,
+            misfire_grace_time=4 * 3600,
+        )
+
         # 1b2. Selective — HIGH-CONVICTION track (12:16 UTC = 20:16 MYT). Fires only when the
         # Phase-7-proven conditions stack (CHOP regime + sector ETF + structure confluence);
         # posts nothing otherwise. The accuracy play. See services/selective_engine.py.
