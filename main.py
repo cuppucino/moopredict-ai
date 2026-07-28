@@ -10,7 +10,7 @@ from loguru import logger
 
 # Configure logging to both console and file
 LOG_FILE = os.path.join(os.path.dirname(__file__), "logs", "combined.log")
-logger.add(LOG_FILE, rotation="500 MB", retention="10 days", level="INFO")
+logger.add(LOG_FILE, rotation="50 MB", retention="14 days", compression="zip", level="INFO")
 
 from core.database import init_db, get_db, UserWatchlist, NewsIntel, SocialPost, SessionLocal, Prediction, MCPTResult
 from core.scheduler import scheduler
@@ -1074,6 +1074,16 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 ids = ", ".join(f"#{i}" for i in res.get("ids", []))
                 return {"content": f"🤖 *Auto-Draft* — posted {res.get('posted')} prediction(s): {ids}"}
             return {"content": f"⚠️ Auto-Draft failed: {res.get('error')}"}
+
+        if command == "selective":
+            from services.selective_engine import selective_engine
+            res = selective_engine.generate()
+            if not res.get("success"):
+                return {"content": f"⚠️ Selective failed: {res.get('error')}"}
+            if not res.get("posted"):
+                return {"content": f"🎯 *Selective* — no high-conviction setup today ({res.get('note','')})"}
+            ids = ", ".join(f"#{i}" for i in res.get("ids", []))
+            return {"content": f"🎯 *Selective* — fired {res.get('posted')} high-conviction: {ids}"}
 
         if command == "positionwatch":
             from services.position_watch_engine import position_watch_engine

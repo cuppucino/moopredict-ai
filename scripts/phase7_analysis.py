@@ -111,7 +111,12 @@ def report(rows, cohort_label):
 
     # ---- Source: auto-draft baseline vs openclaw discretionary ----
     def source(p):
-        return "AUTO_DRAFT (baseline)" if "[AUTO_DRAFT]" in (p.catalyst or "") else "openclaw (discretionary)"
+        cat = p.catalyst or ""
+        if "[SELECTIVE]" in cat:
+            return "SELECTIVE (high-conviction)"
+        if "[AUTO_DRAFT]" in cat:
+            return "AUTO_DRAFT (baseline)"
+        return "openclaw (discretionary)"
     group_report("BY SOURCE (baseline vs discretionary):", rows, source)
 
     # ---- WR when a given structure signal was present ----
