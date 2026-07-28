@@ -2040,4 +2040,7 @@ startup_time = time.time()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=3001)
+    # SECURITY (2026-07-28): bind to localhost only. The webhook has no auth and exposes
+    # buy/sell -> place_order on the REAL brokerage account; 0.0.0.0 let any device on the LAN
+    # place trades. All callers (openclaw, the app itself) are local, so 127.0.0.1 is safe.
+    uvicorn.run(app, host="127.0.0.1", port=3001)
