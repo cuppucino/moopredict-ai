@@ -8,6 +8,14 @@ from typing import List, Dict, Optional
 from futu import *
 from loguru import logger
 
+# ─── LIVE TRADING HARD KILL-SWITCH (2026-07-29) ───────────────────────────────
+# This is a PAPER-PREDICTION system. Live order placement is disabled at the code
+# level so NO webhook command, bug, or DB-flag flip can ever fire a real trade on
+# the brokerage account. Re-enabling requires a deliberate edit here (not a runtime
+# toggle) plus the existing SystemState.real_trading_unlocked gate.
+LIVE_TRADING_ENABLED = False
+
+
 class MoomooService:
     def __init__(self, host: str = None, port: int = None):
         load_dotenv()
@@ -238,7 +246,10 @@ class MoomooService:
             return []
 
     def place_order(self, symbol: str, qty: float, side: str, order_type: str = "MARKET", price: float = 0.0) -> Dict:
-        """Place a trade order."""
+        """Place a trade order. HARD-DISABLED — paper-prediction system only."""
+        if not LIVE_TRADING_ENABLED:
+            logger.warning(f"[Moomoo] place_order REFUSED for {symbol} — live trading hard-disabled (paper only)")
+            return {"success": False, "error": "live_trading_disabled"}
         if not self.trd_ctx or not self.acc_id:
             return {"success": False, "error": "Not connected to Moomoo"}
 
