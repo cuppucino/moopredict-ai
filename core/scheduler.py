@@ -177,7 +177,7 @@ class Scheduler:
         )
 
         # Scrapers
-        self.scheduler.add_job(news_scraper.run, CronTrigger.from_crontab("0 * * * *", timezone=pytz.utc), id="news_scrape_job")
+        self.scheduler.add_job(news_scraper.run, CronTrigger.from_crontab("*/30 * * * *", timezone=pytz.utc), id="news_scrape_job")  # every 30 min — catch intraday breaking news
         self.scheduler.add_job(x_scraper.run, CronTrigger.from_crontab("*/15 * * * *", timezone=pytz.utc), id="x_scrape_job")
         self.scheduler.add_job(reddit_scraper.run, CronTrigger.from_crontab("*/30 * * * *", timezone=pytz.utc), id="reddit_scrape_job")
 
@@ -336,6 +336,22 @@ class Scheduler:
             id="focus_job",
             max_instances=1,
             misfire_grace_time=4 * 3600,
+        )
+
+        # Focus INTRADAY — every 30 min during US market hours (13:30-20:00 UTC = 21:30-04:00 MYT).
+        # Re-checks the 4 ETFs on fresh news; flips + updates a standing call if news breaks, so the
+        # prediction reacts intraday instead of being locked at premarket. See focus_engine.intraday_update.
+        def _run_focus_intraday():
+            from services.focus_engine import focus_engine
+            try:
+                focus_engine.intraday_update()
+            except Exception as e:
+                logger.error(f"[Scheduler] Focus intraday failed: {e}")
+        self.scheduler.add_job(
+            _run_focus_intraday,
+            CronTrigger.from_crontab("*/30 13-20 * * mon-fri", timezone=pytz.utc),
+            id="focus_intraday_job",
+            max_instances=1,
         )
 
         # 1b2. Selective — HIGH-CONVICTION track (12:16 UTC = 20:16 MYT). Fires only when the

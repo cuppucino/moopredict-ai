@@ -25,7 +25,7 @@ from services.prediction_service import prediction_service
 from services.sentiment_engine import sentiment_engine
 from services.ta_engine import ta_engine
 from services.political_monitor import TICKER_ALIASES
-from core.database import SessionLocal, NewsIntel
+from core.database import SessionLocal, NewsIntel, Prediction
 
 FOCUS_ETFS = ["SPY", "QQQ", "SMH", "XLE"]
 
@@ -144,6 +144,56 @@ class FocusEngine:
         logger.info(f"[Focus] {len(posted_ids)} posted: " +
                     ", ".join(f"{r['etf']} {r['direction']} {r['confidence']}%" for r in results))
         return {"success": bool(posted_ids), "posted": len(posted_ids), "ids": posted_ids, "results": results}
+
+    def intraday_update(self) -> Dict:
+        """Re-evaluate the 4 ETFs against FRESH news every 30 min during market hours. Keeps
+        today's standing prediction reactive: if a signal has FLIPPED direction on breaking news,
+        update that prediction in place + alert. One prediction per ETF/day — the final state at
+        the deadline is what resolves — so scoring stays clean while the call stays current."""
+        changes, refreshed = [], 0
+        for etf in FOCUS_ETFS:
+            news_sig, news_det = _news_signal(etf)
+            tech_sig, tech_det = _technical_signal(etf)
+            prior = PRIORS.get(etf, DEFAULT_PRIOR)
+            p = _clamp(prior + W_NEWS * news_sig + W_TECH * tech_sig, 0.05, 0.95)
+            new_dir = "UP" if p >= 0.5 else "DOWN"
+            new_conf = round((p if new_dir == "UP" else 1 - p) * 100, 1)
+            db = SessionLocal()
+            try:
+                since = datetime.utcnow() - timedelta(hours=14)
+                pred = (db.query(Prediction)
+                        .filter_by(symbol=etf, category="focus", outcome=None)
+                        .filter(Prediction.created_at >= since)
+                        .order_by(Prediction.id.desc())
+                        .first())
+                if not pred:
+                    continue
+                if pred.direction != new_dir:
+                    old = pred.direction
+                    pred.direction, pred.confidence = new_dir, new_conf
+                    pred.catalyst = (f"[FOCUS][intraday-revised {old}->{new_dir}] {etf} @ {new_conf}% "
+                                     f"— news[{news_det}] tech[{tech_det}]")
+                    db.commit()
+                    changes.append(f"{etf} {old}->{new_dir} @ {new_conf}%")
+                    logger.warning(f"[Focus] INTRADAY FLIP {etf} {old}->{new_dir} on fresh news")
+                else:
+                    pred.confidence = new_conf
+                    db.commit()
+                    refreshed += 1
+            except Exception as e:
+                logger.error(f"[Focus] intraday update {etf}: {e}")
+            finally:
+                db.close()
+        if changes:
+            try:
+                from services.notifications import notification_queue
+                notification_queue.enqueue(
+                    f"🚨 *Focus revised on breaking news*\n" + "\n".join(f"• {c}" for c in changes),
+                    "warning", category="news")
+            except Exception:
+                pass
+        logger.info(f"[Focus] intraday: {len(changes)} flip(s), {refreshed} refreshed")
+        return {"changes": changes, "refreshed": refreshed}
 
     def _render(self, results) -> str:
         out = [f"# Focus — {datetime.utcnow().date().isoformat()}",
