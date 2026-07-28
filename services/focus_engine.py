@@ -37,9 +37,14 @@ DRIVERS = {
     "XLE": ["oil", "crude", "brent", "wti", "opec", "energy prices", "gas prices"],
 }
 
-UP_DRIFT_PRIOR = 0.54    # ~54% of equity days are up — the base rate to start from
-W_NEWS = 0.14            # news moves the needle more than TA (backtest: TA ~= coin flip)
-W_TECH = 0.09
+# Per-ETF up-drift base rate, calibrated from ~1yr history (scripts/calibrate_focus.py).
+# Each ETF drifts up at its own rate — this is the honest starting probability.
+PRIORS = {"SPY": 0.548, "QQQ": 0.565, "SMH": 0.595, "XLE": 0.559}
+DEFAULT_PRIOR = 0.54
+W_NEWS = 0.16    # news is the ONLY additive edge we have — carries the weight
+# Technicals scored 43-50% (WORSE than base) across every backtest — near-zero weight so the
+# "technical agent" is present (per design) but can't drag the call. Dropped if it hurts live.
+W_TECH = 0.04
 
 INTEL_DIR = Path(__file__).resolve().parent.parent / "data" / "focus"
 
@@ -112,14 +117,15 @@ class FocusEngine:
         for etf in FOCUS_ETFS:
             news_sig, news_det = _news_signal(etf)
             tech_sig, tech_det = _technical_signal(etf)
-            p = _clamp(UP_DRIFT_PRIOR + W_NEWS * news_sig + W_TECH * tech_sig, 0.05, 0.95)
+            prior = PRIORS.get(etf, DEFAULT_PRIOR)
+            p = _clamp(prior + W_NEWS * news_sig + W_TECH * tech_sig, 0.05, 0.95)
             direction = "UP" if p >= 0.5 else "DOWN"
             confidence = round((p if direction == "UP" else 1 - p) * 100, 1)
             results.append({"etf": etf, "direction": direction, "confidence": confidence,
                             "p_up": round(p, 3), "news": news_det, "tech": tech_det})
 
             catalyst = (f"[FOCUS] {etf} {direction} @ {confidence}% — news[{news_det}] "
-                        f"tech[{tech_det}] prior={UP_DRIFT_PRIOR} -> P(up)={p:.2f}")
+                        f"tech[{tech_det}] prior={prior} -> P(up)={p:.2f}")
             kw = dict(symbol=etf, direction=direction, confidence=confidence, catalyst=catalyst,
                       category="focus", timeframe_days=1, prediction_tag="TA_ONLY")
             res = prediction_service.create_prediction(force=False, **kw)
