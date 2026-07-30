@@ -389,6 +389,23 @@ class Scheduler:
             misfire_grace_time=4 * 3600,
         )
 
+        # 1c2. Snapback — the MCPT-validated oversold edge (12:22 UTC = 20:22 MYT, Mon-Fri).
+        # Fires ONLY when RSI(2)<10 on a universe ETF (most days: silence). UP, 3d hold,
+        # conf=72 (the measured rate). See services/snapback_engine.py.
+        def _run_snapback():
+            from services.snapback_engine import snapback_engine
+            try:
+                snapback_engine.generate()
+            except Exception as e:
+                logger.error(f"[Scheduler] Snapback failed: {e}")
+        self.scheduler.add_job(
+            _run_snapback,
+            CronTrigger.from_crontab("22 12 * * mon-fri", timezone=pytz.utc),
+            id="snapback_job",
+            max_instances=1,
+            misfire_grace_time=4 * 3600,
+        )
+
         # 1d. Position-Intel — daily intelligence briefing on the user's held positions
         # (12:18 UTC = 20:18 MYT, 2 min before position-watch). Gathers earnings / sentiment /
         # matched news per holding -> data/position_intel/. See position_intel_engine.py.

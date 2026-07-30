@@ -1075,6 +1075,17 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"content": f"🤖 *Auto-Draft* — posted {res.get('posted')} prediction(s): {ids}"}
             return {"content": f"⚠️ Auto-Draft failed: {res.get('error')}"}
 
+        if command == "snapback":
+            from services.snapback_engine import snapback_engine
+            res = snapback_engine.generate()
+            if not res.get("success") and res.get("posted") is None:
+                return {"content": "⚠️ Snapback failed"}
+            if not res.get("posted"):
+                return {"content": "🪃 *Snapback* — no RSI(2)<10 extremes today (silence is correct)"}
+            trg = ", ".join(f"{s}({r})" for s, r in res.get("triggers", []))
+            ids = ", ".join(f"#{i}" for i in res.get("ids", []))
+            return {"content": f"🪃 *Snapback fired* — {trg} → UP, 3d hold: {ids}"}
+
         if command == "focus":
             from services.focus_engine import focus_engine
             res = focus_engine.generate()

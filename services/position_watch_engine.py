@@ -60,6 +60,17 @@ class PositionWatchEngine:
             return "UP" if fib["direction"] == "up" else "DOWN"
         return None
 
+    def _has_history(self, symbol: str, min_bars: int = 60) -> bool:
+        """Does this symbol have enough daily bars for any technical read to be meaningful?
+        Recent listings (SKHY debuted mid-Jul-2026) don't — predictions on them from
+        defaults are guesses dressed up as calls."""
+        try:
+            from services.ta_engine import ta_engine
+            df = ta_engine._get_kline_data(symbol, num=min_bars + 10)
+            return df is not None and len(df) >= min_bars
+        except Exception:
+            return False
+
     def generate_daily(self) -> Dict:
         """Predict direction on every currently-held position, once per day."""
         try:
@@ -109,6 +120,14 @@ class PositionWatchEngine:
                 if struct:
                     direction, source, confidence, tier = struct, "structure", 48.0, "MEDIUM"
                 else:
+                    # No news, no sentiment, no chart read. If the stock also has almost no
+                    # price history (recent listing — e.g. SKHY, Nasdaq debut mid-Jul), a
+                    # regime-default guess is fake precision: SKHY got 4 straight default-UP
+                    # misses while crashing. Honest output is NO CALL.
+                    if not self._has_history(sym):
+                        logger.info(f"[PositionWatch] {sym}: NO CALL — no signal and insufficient "
+                                    f"price history (recent listing); skipping instead of guessing")
+                        continue
                     direction = "DOWN" if regime == "TREND_DOWN" else "UP"
                     source, confidence, tier = "regime", 42.0, "LOW"
 

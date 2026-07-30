@@ -41,7 +41,11 @@ DRIVERS = {
 # Each ETF drifts up at its own rate — this is the honest starting probability.
 PRIORS = {"SPY": 0.548, "QQQ": 0.565, "SMH": 0.595, "XLE": 0.559}
 DEFAULT_PRIOR = 0.54
-W_NEWS = 0.16    # news is the ONLY additive edge we have — carries the weight
+# 2026-07-30 re-tune: at W_NEWS=0.16 the news could never overcome the priors — 11 of the
+# first 12 focus calls were UP and two red days went 1/8. News is the only edge we have, so it
+# must be ABLE to flip a call: at 0.30, a strongly bearish read (sig -0.5) pulls P(up) by -0.15,
+# enough to take any prior below 0.5. Mildly bearish news still only dents confidence.
+W_NEWS = 0.30
 # Technicals scored 43-50% (WORSE than base) across every backtest — near-zero weight so the
 # "technical agent" is present (per design) but can't drag the call. Dropped if it hurts live.
 W_TECH = 0.04
@@ -84,7 +88,10 @@ def _news_signal(symbol: str) -> Tuple[float, str]:
 
     # blend sentiment-engine score and driver polarity; scale confidence by how much we found
     raw = 0.6 * base + 0.4 * driver
-    coverage = min(1.0, (base_n + matched) / 4.0)   # thin coverage -> weak signal
+    # Coverage dampener softened /4 -> /2 (2026-07-30): with /4 plus W_NEWS=0.16 the news never
+    # once flipped a call. Two matched headlines now count at full strength; a single headline
+    # still only half-counts (guards against one-story flips).
+    coverage = min(1.0, (base_n + matched) / 2.0)
     sig = _clamp(raw * coverage, -1.0, 1.0)
     return sig, f"sent={base:+.2f}/{base_n} driver={driver:+.2f}({matched}n) -> {sig:+.2f}"
 
