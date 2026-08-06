@@ -37,9 +37,12 @@ DRIVERS = {
     "XLE": ["oil", "crude", "brent", "wti", "opec", "energy prices", "gas prices"],
 }
 
-# Per-ETF up-drift base rate, calibrated from ~1yr history (scripts/calibrate_focus.py).
-# Each ETF drifts up at its own rate — this is the honest starting probability.
-PRIORS = {"SPY": 0.548, "QQQ": 0.565, "SMH": 0.595, "XLE": 0.559}
+# Per-ETF up-drift base rate. SPY/QQQ/XLE calibrated from ~1yr history and CONFIRMED stable
+# across 5y/10y/full windows (scripts/validate_focus_priors.py, 2026-07-30). SMH recalibrated
+# 2026-07-30: the original 0.595 existed only in the 1y/300-bar window (one semi bull run) —
+# 10y=54.8 / 5y=53.8 / 3y=56.2 / 1y=59.4 -> multi-window blend 0.560. We were overconfident
+# on SMH by ~4pp; validation output: scratch/openclaw_research_loop/FOCUS_VALIDATION_2026-07-30.txt
+PRIORS = {"SPY": 0.548, "QQQ": 0.565, "SMH": 0.560, "XLE": 0.559}
 DEFAULT_PRIOR = 0.54
 # 2026-07-30 re-tune: at W_NEWS=0.16 the news could never overcome the priors — 11 of the
 # first 12 focus calls were UP and two red days went 1/8. News is the only edge we have, so it
@@ -55,6 +58,43 @@ INTEL_DIR = Path(__file__).resolve().parent.parent / "data" / "focus"
 
 def _clamp(x, lo, hi):
     return max(lo, min(hi, x))
+
+
+def _log_decision(phase: str, etf: str, prior: float, news_sig: float, tech_sig: float,
+                  p_up: float, direction: str, confidence: float, prediction_id=None,
+                  news_det: str = "", tech_det: str = "", applied_change: str = ""):
+    """Append one decision record to data/focus/decisions.jsonl (2026-07-30).
+
+    This is how W_NEWS ever gets a verdict: the engine only adds value over the prior
+    on evaluations where the signals flip (or nearly flip) the call away from the
+    prior's always-UP default. Storing prior AND final P per evaluation makes those
+    days measurable against resolved outcomes, and lets any weight setting be
+    replayed offline. Every evaluation is logged, including intraday re-checks.
+    Best-effort: logging must never break the engine.
+    """
+    try:
+        import json
+        INTEL_DIR.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "ts": datetime.utcnow().isoformat(timespec="seconds"),
+            "phase": phase,  # daily | intraday
+            "etf": etf,
+            "prior": round(prior, 4),
+            "w_news": W_NEWS, "w_tech": W_TECH,
+            "news_sig": round(news_sig, 4), "tech_sig": round(tech_sig, 4),
+            "p_up": round(p_up, 4),
+            "direction": direction, "confidence": confidence,
+            "flip_vs_prior": (p_up < 0.5) != (prior < 0.5),
+            "near_flip": abs(p_up - 0.5) <= 0.05,
+            "prediction_id": prediction_id,
+            "news_det": news_det, "tech_det": tech_det,
+        }
+        if applied_change:
+            rec["applied_change"] = applied_change
+        with open(INTEL_DIR / "decisions.jsonl", "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception as e:
+        logger.warning(f"[Focus] decision log failed for {etf}: {e}")
 
 
 def _news_signal(symbol: str) -> Tuple[float, str]:
@@ -141,6 +181,9 @@ class FocusEngine:
             if res.get("success"):
                 posted_ids.append(res["prediction_id"])
                 logger.success(f"[Focus] #{res['prediction_id']} {etf} {direction} {confidence}%")
+            _log_decision("daily", etf, prior, news_sig, tech_sig, p, direction, confidence,
+                          prediction_id=res.get("prediction_id"),
+                          news_det=news_det, tech_det=tech_det)
 
         try:
             INTEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -174,6 +217,8 @@ class FocusEngine:
                         .order_by(Prediction.id.desc())
                         .first())
                 if not pred:
+                    _log_decision("intraday", etf, prior, news_sig, tech_sig, p, new_dir, new_conf,
+                                  news_det=news_det, tech_det=tech_det)
                     continue
                 if pred.direction != new_dir:
                     old = pred.direction
@@ -183,10 +228,15 @@ class FocusEngine:
                     db.commit()
                     changes.append(f"{etf} {old}->{new_dir} @ {new_conf}%")
                     logger.warning(f"[Focus] INTRADAY FLIP {etf} {old}->{new_dir} on fresh news")
+                    _log_decision("intraday", etf, prior, news_sig, tech_sig, p, new_dir, new_conf,
+                                  prediction_id=pred.id, news_det=news_det, tech_det=tech_det,
+                                  applied_change=f"{old}->{new_dir}")
                 else:
                     pred.confidence = new_conf
                     db.commit()
                     refreshed += 1
+                    _log_decision("intraday", etf, prior, news_sig, tech_sig, p, new_dir, new_conf,
+                                  prediction_id=pred.id, news_det=news_det, tech_det=tech_det)
             except Exception as e:
                 logger.error(f"[Focus] intraday update {etf}: {e}")
             finally:

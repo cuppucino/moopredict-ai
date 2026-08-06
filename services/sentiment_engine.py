@@ -1,5 +1,5 @@
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from loguru import logger
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -16,6 +16,14 @@ class SentimentEngine:
             'buy': 1.0, 'sell': -1.0, 'hold': 0.0, 'upgrade': 2.0,
             'downgrade': -2.0, 'ath': 1.5, 'bottom': 1.0, 'top': -1.0
         })
+
+    @staticmethod
+    def _naive_utc(dt: datetime) -> datetime:
+        """Mixed rows: older scrapes stored naive-UTC, newer ones tz-aware. Normalize
+        to naive UTC so age math never throws (the SPY every-30-min crash)."""
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
 
     def score_text(self, text: str) -> float:
         """Fast VADER scoring (-1.0 to 1.0)."""
@@ -44,14 +52,14 @@ class SentimentEngine:
             # News: 1.5x weight
             for n in news:
                 raw = self.score_text(n.headline)
-                age_hours = (now - n.scraped_at).total_seconds() / 3600
+                age_hours = (now - self._naive_utc(n.scraped_at)).total_seconds() / 3600
                 decay = math.exp(-0.02 * age_hours) # Decays over 48h
                 weighted_scores.append(raw * 1.5 * decay)
             
             # Social: 0.8x weight
             for s in social:
                 raw = self.score_text(s.content)
-                age_hours = (now - s.scraped_at).total_seconds() / 3600
+                age_hours = (now - self._naive_utc(s.scraped_at)).total_seconds() / 3600
                 decay = math.exp(-0.04 * age_hours) # Social decays faster
                 weighted_scores.append(raw * 0.8 * decay)
                 

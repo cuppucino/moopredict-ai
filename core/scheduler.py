@@ -389,19 +389,74 @@ class Scheduler:
             misfire_grace_time=4 * 3600,
         )
 
-        # 1c2. Snapback — the MCPT-validated oversold edge (12:22 UTC = 20:22 MYT, Mon-Fri).
-        # Fires ONLY when RSI(2)<10 on a universe ETF (most days: silence). UP, 3d hold,
-        # conf=72 (the measured rate). See services/snapback_engine.py.
-        def _run_snapback():
-            from services.snapback_engine import snapback_engine
+        # 1c2. Snapback — DISABLED 2026-07-31 per 11_snapback_plan.md Step 1 verdict:
+        # 1a (26y regime-stratified backtest) PASS, but 1b (corrected joint-permutation
+        # MCPT) KILL — p=0.0679 (3d) / 0.0280 (5d), fails the p<0.01 bar at both holds.
+        # Plan rule: PASS requires 1a AND 1b; any kill -> STOP. The earlier p=0.0000 was
+        # a spuriously-small screen (independent per-ETF shuffles). Engine + !snapback
+        # webhook kept for manual runs / future re-validation.
+        # def _run_snapback():
+        #     from services.snapback_engine import snapback_engine
+        #     try:
+        #         snapback_engine.generate()
+        #     except Exception as e:
+        #         logger.error(f"[Scheduler] Snapback failed: {e}")
+        # self.scheduler.add_job(
+        #     _run_snapback,
+        #     CronTrigger.from_crontab("22 12 * * mon-fri", timezone=pytz.utc),
+        #     id="snapback_job",
+        #     max_instances=1,
+        #     misfire_grace_time=4 * 3600,
+        # )
+
+        # 1c3. Prediction tripwire — catches SILENT engine failures (12:35 UTC = 20:35 MYT,
+        # 20 min after the focus/position-watch window). Three incidents in 4 days posted
+        # zero or partial predictions with no alert: Fri 07-31 (Mac asleep + network out),
+        # Mon 08-03 (OpenD dead -> DB pool leak). If no prediction was created today by
+        # 20:35 MYT on a weekday, push an ALERT so kf hears about it the same evening.
+        def _prediction_tripwire():
+            from core.database import SessionLocal, Prediction
+            from datetime import datetime as _dt
+            db = SessionLocal()
             try:
-                snapback_engine.generate()
-            except Exception as e:
-                logger.error(f"[Scheduler] Snapback failed: {e}")
+                today_start = _dt.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                n_today = (db.query(Prediction)
+                           .filter(Prediction.created_at >= today_start)
+                           .count())
+            finally:
+                db.close()
+            if n_today == 0:
+                logger.error("[Tripwire] ZERO predictions posted today — engines failed silently.")
+                notification_queue.enqueue(
+                    "🚨 *Prediction tripwire*: NO predictions posted tonight (engines silent). "
+                    "Check OpenD is running, network is up, and /health. "
+                    "Manual recovery: `!focus` and `!positionwatch` webhooks.",
+                    level="alert", category="risk",
+                )
+            else:
+                logger.info(f"[Tripwire] OK — {n_today} prediction(s) posted today.")
         self.scheduler.add_job(
-            _run_snapback,
-            CronTrigger.from_crontab("22 12 * * mon-fri", timezone=pytz.utc),
-            id="snapback_job",
+            _prediction_tripwire,
+            CronTrigger.from_crontab("35 12 * * mon-fri", timezone=pytz.utc),
+            id="prediction_tripwire_job",
+            max_instances=1,
+            misfire_grace_time=4 * 3600,
+        )
+
+        # 1c4. Spread snapshot — refreshes data/costs.json with REGULAR-HOURS bid/ask
+        # (14:35 UTC = 10:35 ET, mid-morning liquidity). Premarket spreads run 10-100x
+        # RTH (XLP measured 144bps premarket vs ~2bps RTH) — scorecard costs must come
+        # from RTH. snapshot_spreads.py refuses to overwrite RTH data with off-hours.
+        def _run_spread_snapshot():
+            try:
+                from scripts.snapshot_spreads import run_and_save
+                run_and_save()
+            except Exception as e:
+                logger.error(f"[Scheduler] Spread snapshot failed: {e}")
+        self.scheduler.add_job(
+            _run_spread_snapshot,
+            CronTrigger.from_crontab("35 14 * * mon-fri", timezone=pytz.utc),
+            id="spread_snapshot_job",
             max_instances=1,
             misfire_grace_time=4 * 3600,
         )
@@ -487,16 +542,24 @@ class Scheduler:
                 if not results:
                     return
                 
-                correct = len([r for r in results if r.outcome == 'RIGHT'])
-                total = len(results)
+                # Headline = direction-only (kf 2026-07-30); 0.3%-bar kept as secondary.
+                from services.prediction_service import direction_hit
+                scorable = [r for r in results if r.outcome in ("RIGHT", "WRONG")
+                            and direction_hit(r.direction, r.actual_move_pct) is not None]
+                correct = len([r for r in scorable if direction_hit(r.direction, r.actual_move_pct)])
+                total = len(scorable)
                 win_rate = (correct / total * 100) if total > 0 else 0
-                
+                m_total = len([r for r in results if r.outcome in ("RIGHT", "WRONG")])
+                m_right = len([r for r in results if r.outcome == "RIGHT"])
+                meaningful = (m_right / m_total * 100) if m_total > 0 else 0
+
                 msg = (
                     f"📊 *Daily Accuracy Report*\n"
                     f"───────────────────────────\n"
-                    f"Total Predictions: {total}\n"
-                    f"✅ Correct: {correct}\n"
-                    f"🎯 Win Rate: {win_rate:.1f}%"
+                    f"Total Predictions: {len(results)}\n"
+                    f"✅ Direction right: {correct}/{total}\n"
+                    f"🎯 Win Rate (direction): {win_rate:.1f}%\n"
+                    f"💪 Meaningful (>0.3%): {meaningful:.1f}%"
                 )
                 notification_queue.enqueue(msg, level="info", category="general")
             finally:

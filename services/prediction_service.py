@@ -78,6 +78,26 @@ def classify_regime() -> str:
         return "UNKNOWN"
 
 
+def direction_hit(direction: str, actual_move_pct) -> "Optional[bool]":
+    """Headline scoring (kf decision 2026-07-30): direction-only — did the sign match?
+
+    The system's stated goal is "predict whether it goes down or up" — so the headline
+    win rate credits UP on ANY positive close and DOWN on any negative close. The
+    stored outcome column (RIGHT requires |move| > 0.3%) is unchanged and stays
+    reported as the secondary "meaningful move" stat: under that bar even a perfect
+    always-UP baseline scores only ~37-45% on these ETFs (SPY's ±0.3% neutral zone is
+    32% of all days — see FOCUS_VALIDATION_2026-07-30.txt), which made the headline
+    unreadable against the 53% goal. Returns None when unscorable.
+    """
+    if actual_move_pct is None:
+        return None
+    if direction == "UP":
+        return actual_move_pct > 0
+    if direction == "DOWN":
+        return actual_move_pct < 0
+    return None
+
+
 def compute_threshold_flags(direction: str, move_pct: float) -> Dict[str, bool]:
     """Return dict of would_be_right_at_XXpct booleans for the 4 threshold levels."""
     if move_pct is None or direction not in ("UP", "DOWN"):
@@ -540,24 +560,30 @@ class PredictionService:
         """
         db = SessionLocal()
         try:
-            total = db.query(Prediction).filter(Prediction.outcome != None).count()
-            right = db.query(Prediction).filter(Prediction.outcome == "RIGHT").count()
-            
-            accuracy = (right / total * 100) if total > 0 else 0
-            
-            # By category
-            categories = db.query(Prediction.category).distinct().all()
+            resolved = db.query(Prediction).filter(Prediction.outcome != None).all()
+            # Headline = direction-only (kf 2026-07-30); NEUTRAL/unscorable rows excluded.
+            # Secondary "meaningful move" = the stored outcome (RIGHT needs |move| > 0.3%).
+            scorable = [p for p in resolved
+                        if direction_hit(p.direction, p.actual_move_pct) is not None
+                        and p.outcome in ("RIGHT", "WRONG")]
+            hits = sum(1 for p in scorable if direction_hit(p.direction, p.actual_move_pct))
+            accuracy = (100 * hits / len(scorable)) if scorable else 0
+            meaningful = [p for p in resolved if p.outcome in ("RIGHT", "WRONG")]
+            m_right = sum(1 for p in meaningful if p.outcome == "RIGHT")
+            accuracy_meaningful = (100 * m_right / len(meaningful)) if meaningful else 0
+
             cat_stats = {}
-            for (cat,) in categories:
-                c_total = db.query(Prediction).filter(Prediction.category == cat, Prediction.outcome != None).count()
-                if c_total > 0:
-                    c_right = db.query(Prediction).filter(Prediction.category == cat, Prediction.outcome == "RIGHT").count()
-                    cat_stats[cat] = round((c_right / c_total * 100), 2)
+            for p in scorable:
+                cat_stats.setdefault(p.category, [0, 0])
+                cat_stats[p.category][1] += 1
+                cat_stats[p.category][0] += bool(direction_hit(p.direction, p.actual_move_pct))
+            cat_stats = {c: round(100 * h / n, 2) for c, (h, n) in cat_stats.items() if n > 0}
 
             return {
-                "total_resolved": total,
-                "accuracy_pct": round(accuracy, 2),
-                "by_category": cat_stats
+                "total_resolved": len(resolved),
+                "accuracy_pct": round(accuracy, 2),            # headline: direction-only
+                "accuracy_meaningful_pct": round(accuracy_meaningful, 2),  # |move| > 0.3% bar
+                "by_category": cat_stats,                       # direction-only per category
             }
         except Exception as e:
             logger.error(f"[Prediction] Stats error: {e}")

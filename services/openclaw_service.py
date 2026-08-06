@@ -71,6 +71,11 @@ class OpenClawService:
             else:
                 logger.error(f"[OpenClaw] Agent trigger failed with status {response.status_code}: {response.text}")
                 return False
+        except requests.exceptions.ConnectionError:
+            # Gateway not running (kf stops the Docker container when not in use) —
+            # expected, not an error. Log quietly so it doesn't spam every 30-min tick.
+            logger.debug("[OpenClaw] Gateway unreachable (container off?) — skipping trigger.")
+            return False
         except Exception as e:
             logger.error(f"[OpenClaw] Error triggering agent hook: {e}")
             return False

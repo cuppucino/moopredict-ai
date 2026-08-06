@@ -54,42 +54,69 @@ class AlertService:
             db.close()
 
     def check_alerts(self):
-        """Check all active alerts against current prices."""
+        """Check all active alerts against current prices.
+
+        DB session lifecycle matters here: this job runs every 5 min under a 30s
+        timeout, and moomoo calls can wedge indefinitely. Holding a session across
+        those calls leaked one 'idle in transaction' connection per run until the
+        pool died (2026-08-03: 50 leaked in ~4h, all engines down). Same fix as the
+        heartbeat: snapshot alert rows, CLOSE the session, then do slow network
+        calls, and reopen a fresh session only to write triggers.
+        """
         db = SessionLocal()
         try:
             active_alerts = db.query(PriceAlert).filter(PriceAlert.status == "ACTIVE").all()
-            if not active_alerts:
-                return
+            alert_rows = [
+                {"id": a.id, "symbol": a.symbol, "price": a.price, "direction": a.direction}
+                for a in active_alerts
+            ]
+        except Exception as e:
+            logger.error(f"[Alerts] Error loading alerts: {e}")
+            return
+        finally:
+            db.close()
 
-            # Get current prices for symbols
-            # Fallback to technical_analysis service if not in positions
+        if not alert_rows:
+            return
+
+        # Network calls with NO session held — a wedge here can no longer leak.
+        try:
             from services.technical_analysis import ta_service
-            
+
             positions = moomoo_service.get_positions()
             price_map = {p['symbol']: p['current_price'] for p in positions}
 
-            for alert in active_alerts:
-                current_price = price_map.get(alert.symbol)
-                
+            triggered_rows = []
+            for row in alert_rows:
+                current_price = price_map.get(row["symbol"])
+
                 if current_price is None:
-                    # Fetch fresh price if not in positions
-                    analysis = ta_service.get_full_analysis(alert.symbol)
+                    analysis = ta_service.get_full_analysis(row["symbol"])
                     current_price = analysis.get('price')
 
                 if current_price is None:
-                    logger.warning(f"[Alerts] Could not fetch price for {alert.symbol}")
+                    logger.warning(f"[Alerts] Could not fetch price for {row['symbol']}")
                     continue
 
-                triggered = False
-                if alert.direction == "ABOVE" and current_price >= alert.price:
-                    triggered = True
-                elif alert.direction == "BELOW" and current_price <= alert.price:
-                    triggered = True
-
-                if triggered:
-                    self._trigger_alert(db, alert, current_price)
+                if row["direction"] == "ABOVE" and current_price >= row["price"]:
+                    triggered_rows.append((row["id"], current_price))
+                elif row["direction"] == "BELOW" and current_price <= row["price"]:
+                    triggered_rows.append((row["id"], current_price))
         except Exception as e:
             logger.error(f"[Alerts] Error checking alerts: {e}")
+            return
+
+        if not triggered_rows:
+            return
+
+        db = SessionLocal()
+        try:
+            for alert_id, current_price in triggered_rows:
+                alert = db.query(PriceAlert).filter(PriceAlert.id == alert_id).first()
+                if alert and alert.status == "ACTIVE":
+                    self._trigger_alert(db, alert, current_price)
+        except Exception as e:
+            logger.error(f"[Alerts] Error triggering alerts: {e}")
         finally:
             db.close()
 

@@ -1,5 +1,13 @@
 """
-Snapback Engine — the project's first VALIDATED edge, live (2026-07-30).
+Snapback Engine — STATUS: cron DISABLED 2026-07-31 (Step 1 verdict KILL).
+
+The corrected joint-permutation MCPT (scripts/mcpt_snapback.py, 11_snapback_plan.md 1b)
+returned p=0.0679 (3d) / 0.0280 (5d) — fails the p<0.01 bar at both holds. The 26-year
+1a backtest PASSED (WR ~57%, PF 1.25-1.34, bear-year PF ~0.97), so the edge looks real
+but modest — just not separable from luck at our own significance bar. Plan rule: PASS
+requires 1a AND 1b. The p=0.0000 cited below was the earlier quick screen (independent
+per-ETF shuffles — spuriously small). Engine kept for manual !snapback runs and future
+re-validation. Original notes:
 
 The edge: buy oversold extremes, hold 3 days. RSI(2) < 10 on daily bars -> mean 3-day
 forward return +0.75% over drift, ~72% win rate (n=250, 10 ETFs, ~300d). Validated by MCPT
