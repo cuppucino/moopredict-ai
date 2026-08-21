@@ -49,7 +49,9 @@ class SignalAggregator:
             # 4. News Sentiment (Scraped Intel)
             sent_val = 0
             try:
-                from services.sentiment_engine import sentiment_engine
+                # NOTE: no local import here — a function-local `from ... import
+                # sentiment_engine` shadows the module-level one and made the earlier
+                # line-16 use crash ("cannot access local variable", seen 2026-08-10).
                 sent_res = sentiment_engine.score_symbol(symbol)
                 if sent_res.get("data_count", 0) > 0:
                     sent_val = sent_res["score"] * 50 # Normalize -1..1 to -50..50
@@ -66,14 +68,17 @@ class SignalAggregator:
                 logger.warning(f"[SignalAggregator] Political sentiment error for {symbol}: {e}")
 
             # 5. Volume Flow Score Derivation
+            # .get() everywhere: failure dicts carry only {success, error} — a bare
+            # ["trend"] KeyError killed the whole consensus 10x/day (audit H6).
             vol_val = 0
             if vol_flow and vol_flow.get("success"):
                 v_score = 5 # Neutral base
-                if vol_flow["trend"] == "BULLISH": v_score += 2
+                if vol_flow.get("trend") == "BULLISH": v_score += 2
                 else: v_score -= 2
-                if "BUY" in vol_flow["signal"]: v_score += 2
-                elif "SHORT" in vol_flow["signal"]: v_score -= 2
-                vol_val = (v_score - 5) * 10 
+                sig = vol_flow.get("signal") or ""
+                if "BUY" in sig: v_score += 2
+                elif "SHORT" in sig: v_score -= 2
+                vol_val = (v_score - 5) * 10
 
             # 6. Final Calculation (Weighted Average)
             # Weights: TA (0.22), Sentiment (0.13), Options (0.13), Vol (0.10), Sector (0.10), Insider (0.12), Political (0.10), News (0.10)

@@ -97,21 +97,46 @@ def _log_decision(phase: str, etf: str, prior: float, news_sig: float, tech_sig:
         logger.warning(f"[Focus] decision log failed for {etf}: {e}")
 
 
+import re
+
+# Word-boundary lexicon (audit 2026-08-13 C2-news): the old substring scan counted
+# "against" as "gain", "surprise" as "rise", "circuit"/"mission" as bearish, and let
+# BULL fire on routine copy — news_sig was positive in 93.2% of 512 evaluations and
+# SPY/QQQ never once read bearish. All terms now match as whole words; phrases that
+# invert polarity for equities are neutralized before counting.
+_BULL_WORDS = ("surge", "surges", "rally", "rallies", "gains", "jumps", "rises", "beats",
+               "soars", "climbs", "boosts", "upgrade", "upgraded", "rebound", "record high")
+_BEAR_WORDS = ("plunge", "plunges", "drops", "falls", "slumps", "sinks", "misses",
+               "sell-off", "selloff", "tumbles", "crashes", "downgrade", "downgraded",
+               "warns", "recession", "record low")
+# Bullish-for-equities phrases that contain bear words — removed from text pre-count.
+_NEUTRALIZE = ("rate cut", "rate cuts", "tax cut", "tax cuts")
+_BULL_RE = [re.compile(r"\b" + re.escape(w) + r"\b") for w in _BULL_WORDS]
+_BEAR_RE = [re.compile(r"\b" + re.escape(w) + r"\b") for w in _BEAR_WORDS]
+
+
+def _term_patterns(symbol: str) -> list:
+    terms = [symbol] + list(TICKER_ALIASES.get(symbol, [])) + list(DRIVERS.get(symbol, []))
+    return [re.compile(r"\b" + re.escape(t.strip().lower()) + r"\b") for t in terms if t.strip()]
+
+
 def _news_signal(symbol: str) -> Tuple[float, str]:
     """Deterministic news read: sentiment on the ETF + driver-keyword news over 48h. [-1,+1]."""
     # base: the sentiment engine's per-symbol score (already lexicon-scored)
     try:
         s = sentiment_engine.score_symbol(symbol) or {}
         base = float(s.get("score", 0.0) or 0.0)
-        base_n = int(s.get("count", 0) or 0)
+        # data_count on the populated path, count on the empty path (audit H1: reading
+        # only "count" was always 0 and silently disarmed the coverage dampener).
+        base_n = int(s.get("data_count", s.get("count", 0)) or 0)
     except Exception:
         base, base_n = 0.0, 0
 
-    # driver news: scan 48h headlines for the ETF's aliases + driver terms, net bull/bear words
-    terms = [symbol.lower()] + [a.lower() for a in TICKER_ALIASES.get(symbol, [])] + DRIVERS.get(symbol, [])
-    BULL = ("surge", "rally", "gain", "jump", "rise", "beat", "record", "soar", "up ", "climb", "boost", "upgrade")
-    BEAR = ("plunge", "drop", "fall", "slump", "sink", "miss", "sell-off", "selloff", "tumble", "crash", "cut", "downgrade", "bear", "warn")
-    cutoff = datetime.utcnow() - timedelta(hours=48)
+    # driver news: scan 48h headlines for the ETF's aliases + driver terms (whole-word),
+    # net bull/bear WORD counts. timestamptz column -> aware cutoff (exact 48h window).
+    from datetime import timezone
+    patterns = _term_patterns(symbol)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
     db = SessionLocal()
     try:
         news = db.query(NewsIntel).filter(NewsIntel.scraped_at >= cutoff).all()
@@ -120,10 +145,12 @@ def _news_signal(symbol: str) -> Tuple[float, str]:
     matched, bull, bear = 0, 0, 0
     for n in news:
         text = f"{n.headline or ''} {n.summary or ''}".lower()
-        if any(t in text for t in terms):
+        for phrase in _NEUTRALIZE:
+            text = text.replace(phrase, " ")
+        if any(p.search(text) for p in patterns):
             matched += 1
-            bull += sum(w in text for w in BULL)
-            bear += sum(w in text for w in BEAR)
+            bull += sum(bool(p.search(text)) for p in _BULL_RE)
+            bear += sum(bool(p.search(text)) for p in _BEAR_RE)
     driver = ((bull - bear) / (bull + bear)) if (bull + bear) else 0.0
 
     # blend sentiment-engine score and driver polarity; scale confidence by how much we found
@@ -199,7 +226,20 @@ class FocusEngine:
         """Re-evaluate the 4 ETFs against FRESH news every 30 min during market hours. Keeps
         today's standing prediction reactive: if a signal has FLIPPED direction on breaking news,
         update that prediction in place + alert. One prediction per ETF/day — the final state at
-        the deadline is what resolves — so scoring stays clean while the call stays current."""
+        the deadline is what resolves — so scoring stays clean while the call stays current.
+
+        Audit fixes 2026-08-13 (C3/H2): (1) no updates at/after 15:30 ET — a flip in the
+        final 30 min (or after close: the one historical flip fired 16:30 ET) is graded on
+        a day already in the books, look-ahead not forecast; (2) same-direction ticks no
+        longer overwrite stored confidence — the DB keeps the value the call was MADE at,
+        so Brier/conviction stats measure the real broadcast (jsonl still logs every tick);
+        (3) flips append to the catalyst instead of replacing it (audit trail preserved)."""
+        from zoneinfo import ZoneInfo
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        if (now_et.hour, now_et.minute) >= (15, 30) or now_et.hour < 9:
+            logger.info("[Focus] intraday: past 15:30 ET (or pre-market) — no updates, "
+                        "day is effectively decided")
+            return {"changes": [], "refreshed": 0, "note": "late-session guard"}
         changes, refreshed = [], 0
         for etf in FOCUS_ETFS:
             news_sig, news_det = _news_signal(etf)
@@ -223,8 +263,10 @@ class FocusEngine:
                 if pred.direction != new_dir:
                     old = pred.direction
                     pred.direction, pred.confidence = new_dir, new_conf
-                    pred.catalyst = (f"[FOCUS][intraday-revised {old}->{new_dir}] {etf} @ {new_conf}% "
-                                     f"— news[{news_det}] tech[{tech_det}]")
+                    # APPEND the revision — never destroy the original thesis.
+                    pred.catalyst = (f"{pred.catalyst} || [intraday-revised {old}->{new_dir} "
+                                     f"{datetime.utcnow():%H:%M}Z @ {new_conf}% — news[{news_det}] "
+                                     f"tech[{tech_det}]]")
                     db.commit()
                     changes.append(f"{etf} {old}->{new_dir} @ {new_conf}%")
                     logger.warning(f"[Focus] INTRADAY FLIP {etf} {old}->{new_dir} on fresh news")
@@ -232,8 +274,8 @@ class FocusEngine:
                                   prediction_id=pred.id, news_det=news_det, tech_det=tech_det,
                                   applied_change=f"{old}->{new_dir}")
                 else:
-                    pred.confidence = new_conf
-                    db.commit()
+                    # Same direction: DB row untouched — stored confidence stays what the
+                    # call was made at. The tick is still fully logged to decisions.jsonl.
                     refreshed += 1
                     _log_decision("intraday", etf, prior, news_sig, tech_sig, p, new_dir, new_conf,
                                   prediction_id=pred.id, news_det=news_det, tech_det=tech_det)

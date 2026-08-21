@@ -82,6 +82,12 @@ class PositionWatchEngine:
         symbols = sorted({_bare(p.get("symbol", "")) for p in positions if p.get("symbol")})
         symbols = [s for s in symbols if s]
         if not symbols:
+            # Distinguish "flat book" from "broker unreachable" (2026-08-21: a dead
+            # OpenD returned [] and this read as a normal no-op for 4 straight days).
+            if not moomoo_service.is_connected:
+                logger.error("[PositionWatch] broker UNREACHABLE — cannot read positions; "
+                             "this is a data failure, not an empty book")
+                return {"success": False, "error": "broker unreachable"}
             logger.info("[PositionWatch] no open positions — nothing to predict")
             return {"success": True, "posted": 0, "ids": [], "note": "no positions"}
 

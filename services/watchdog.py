@@ -17,6 +17,11 @@ class WatchdogService:
         self.thread = None
         self.check_interval_sec = 300 # 5 minutes
         self.alert_threshold_min = 75 # Alert if heartbeat > 75m stale (allows for 1h off-hour interval)
+        # Alert cooldown (audit H5, 2026-08-13): one stale-heartbeat incident produced 30
+        # identical Telegram pushes (one per 5-min check). Alert once, then escalate at
+        # 1h/4h; reset when the heartbeat recovers.
+        self._incident_started = None
+        self._alerts_sent_this_incident = 0
 
     def _send_critical_alert(self, message: str):
         """Directly send a Telegram message bypassing the notification queue."""
@@ -58,10 +63,27 @@ class WatchdogService:
             diff_min = (now - last_check).total_seconds() / 60
 
             if diff_min > self.alert_threshold_min:
-                msg = f"Heartbeat is STALE ({round(diff_min)} minutes).\nLast check: {last_check_str}\n\nSystem monitoring may be DEAD."
-                self._send_critical_alert(msg)
                 logger.error(f"[Watchdog] Heartbeat stale: {diff_min} min")
+                now_mono = datetime.utcnow()
+                if self._incident_started is None:
+                    self._incident_started = now_mono
+                    self._alerts_sent_this_incident = 0
+                incident_min = (now_mono - self._incident_started).total_seconds() / 60
+                # Escalation ladder: incident start, +1h, +4h — then a re-escalation
+                # FLOOR of one alert per 24h (2026-08-21: the 3-alert cap went silent
+                # through a 4-day outage; permanent incidents must keep pinging).
+                n = self._alerts_sent_this_incident
+                due = [0, 60, 240][n] if n < 3 else 240 + (n - 2) * 1440
+                if incident_min >= due:
+                    msg = (f"Heartbeat is STALE ({round(diff_min)} minutes).\n"
+                           f"Last check: {last_check_str}\n\nSystem monitoring may be DEAD.")
+                    self._send_critical_alert(msg)
+                    self._alerts_sent_this_incident += 1
             else:
+                if self._incident_started is not None:
+                    self._send_critical_alert("✅ Heartbeat RECOVERED.")
+                    self._incident_started = None
+                    self._alerts_sent_this_incident = 0
                 logger.debug(f"[Watchdog] Heartbeat is healthy (age: {round(diff_min, 1)} min)")
 
         except Exception as e:

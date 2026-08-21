@@ -65,16 +65,18 @@ class PositionIntelEngine:
                 s = sentiment_engine.score_symbol(sym) or {}
                 sscore = float(s.get("score", 0.0) or 0.0)
                 slabel = s.get("label", "NEUTRAL")
-                scount = int(s.get("count", 0) or 0)
+                # data_count on populated path (audit: "count" was always 0 — briefings
+                # showed "BULLISH from 0 mentions").
+                scount = int(s.get("data_count", s.get("count", 0)) or 0)
             except Exception:
                 sscore, slabel, scount = 0.0, "NEUTRAL", 0
 
-            # --- news matched by ticker + its aliases ---
-            terms = [sym.lower()] + [a.lower() for a in TICKER_ALIASES.get(sym, [])]
+            # --- news matched by ticker + its aliases (word-boundary; audit: substring
+            # matching served "dramatic" headlines as DRAM intel) ---
+            from services.political_monitor import matches_ticker
             heads = []
             for n in news:
-                text = f"{n.headline or ''} {n.summary or ''}".lower()
-                if any(t in text for t in terms):
+                if matches_ticker(f"{n.headline or ''} {n.summary or ''}", sym):
                     heads.append(n.headline)
 
             intel[sym] = {

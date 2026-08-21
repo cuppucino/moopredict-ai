@@ -79,12 +79,29 @@ class MoomooService:
         # Unique IPs while preserving order
         return list(dict.fromkeys(candidates))
 
+    @staticmethod
+    def _port_reachable(ip: str, port: int, timeout_s: float = 3.0) -> bool:
+        """Cheap TCP pre-check. The futu SDK's context constructors can block
+        indefinitely against a dead/half-open OpenD — on 2026-08-17 a single such
+        hang inside focus_job (max_instances=1) silently killed the prediction
+        pipeline for 4 trading days. A refused/filtered port fails here in <=3s."""
+        import socket
+        try:
+            with socket.create_connection((ip, port), timeout=timeout_s):
+                return True
+        except OSError:
+            return False
+
     def connect(self) -> bool:
         """Initialize connection to OpenD with smart IP discovery."""
         target_ips = self.discover_opend_ip()
-        
+
         for ip in target_ips:
             try:
+                if not self._port_reachable(ip, self.port):
+                    logger.warning(f"[Moomoo] OpenD port {ip}:{self.port} unreachable — skipping "
+                                   f"(is OpenD running and logged in?)")
+                    continue
                 logger.info(f"[Moomoo] Trying to connect to OpenD at {ip}:{self.port}...")
                 self.trd_ctx = OpenSecTradeContext(host=ip, port=self.port)
                 self.quote_ctx = OpenQuoteContext(host=ip, port=self.port)

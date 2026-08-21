@@ -187,6 +187,23 @@ def get_tier(handle: str) -> str:
         return "UNKNOWN"
 
 TICKER_ALIASES = {
+    # ─── SINGLE STOCKS (2026-08-14, audit fix: consumer news writes "Nvidia", never
+    # "NVDA" — 0/519 headlines contained a ticker string; company names are how news
+    # actually references these) ──────────────────────────────────────────────
+    "NVDA":  ["Nvidia"],
+    "AAPL":  ["Apple"],
+    "MRVL":  ["Marvell"],
+    "NOK":   ["Nokia"],
+    "STX":   ["Seagate"],
+    "SKHY":  ["SK Hynix", "SK hynix"],
+    "AMD":   ["Advanced Micro Devices"],
+    "INTC":  ["Intel"],
+    "MSFT":  ["Microsoft"],
+    "GOOGL": ["Google", "Alphabet"],
+    "AMZN":  ["Amazon"],
+    "META":  ["Meta Platforms", "Facebook"],
+    "TSLA":  ["Tesla"],
+    "IBM":   ["IBM"],
     # ─── ETF UNIVERSE (primary focus as of 2026-06-26) ────────────────────────
     # Broad index ETFs
     "SPY":   ["S&P 500", "SPX", "S and P 500", "broad market", "US stocks"],

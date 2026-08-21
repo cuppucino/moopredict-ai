@@ -36,14 +36,21 @@ def _round_trip_bps(costs: dict, symbol: str) -> float:
         return float(sym["round_trip_bps"])
     return float(costs.get("default_round_trip_bps", FALLBACK_ROUND_TRIP_BPS))
 
+# Winsorization cap for per-trade magnitude in PF (audit C3, 2026-08-13): one -27.23%
+# IBM row alone decided PF 1.43-vs-1.30 across the unlock gate. Daily ETF moves beyond
+# 10% are either data errors or events no metric should let a single row dominate.
+PNL_CAP_PCT = 10.0
+
+
 def pct_pnl(p) -> float:
     """
     Helper to calculate percentage move magnitude at exit.
     Prioritizes actual_move_pct, falls back to target/entry price, defaults to 0.0.
+    Magnitude winsorized at PNL_CAP_PCT so no single print dominates PF.
     """
     try:
         if p.actual_move_pct is not None:
-            return abs(p.actual_move_pct) / 100.0
+            return min(abs(p.actual_move_pct), PNL_CAP_PCT) / 100.0
         
         # Fallback if actual_move_pct is not resolved but target_price/entry_price exist
         if p.target_price and p.entry_price and p.entry_price > 0:

@@ -65,8 +65,12 @@ class TAEngine:
                 signals.append(TASignal("MACD", hist_val, "BULLISH" if hist_val > 0 else "BEARISH", macd_strength, "MACD Histogram (F-Tier, ignored in score)"))
 
             # 3. VWAP - S-Tier (Critical)
-            # VWAP = Σ(Price * Volume) / Σ(Volume)
-            df['vwap'] = (df['close'] * df['volume']).cumsum() / df['volume'].cumsum()
+            # ROLLING 20-day VWAP (audit 2026-08-13 C1: the old cumulative-from-inception
+            # VWAP left price permanently above it for anything in a multi-year uptrend —
+            # a fixed +25 on every call; tech_sig was never once bearish in 512 records).
+            pv = (df['close'] * df['volume']).rolling(20, min_periods=5).sum()
+            vv = df['volume'].rolling(20, min_periods=5).sum()
+            df['vwap'] = pv / vv
             vwap_val = float(df['vwap'].iloc[-1])
             current_price = float(df['close'].iloc[-1])
             vwap_signal = "BULLISH" if current_price > vwap_val else "BEARISH"

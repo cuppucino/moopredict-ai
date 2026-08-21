@@ -9,7 +9,6 @@ from services.x_scraper import x_scraper
 from services.reddit_scraper import reddit_scraper
 from services.daily_briefing import briefing_service
 from services.notifications import notification_queue
-from services._legacy.options_flow import options_service
 from services.trailing_stop_service import trailing_stop_service
 from services.strategy_service import strategy_service
 from core.database import SessionLocal, UserWatchlist
@@ -19,22 +18,31 @@ from services._legacy.ml_service import ml_service
 from services._legacy.pattern_analyzer import pattern_analyzer
 from services.watchdog import watchdog_service
 
+from concurrent.futures import ThreadPoolExecutor as _TPE
+
+# SHARED executor for timed-out jobs (2026-08-21 fix): the old per-call
+# ThreadPoolExecutor leaked its worker thread on every timeout — 1,394 live threads
+# were found in the process after check_alerts timed out 788 times against a dead
+# OpenD. A shared bounded pool caps the damage; hung workers occupy slots but the
+# count can never grow past max_workers (paired with the TCP pre-check in
+# moomoo_service.connect, hangs themselves are now rare).
+_JOB_POOL = _TPE(max_workers=24, thread_name_prefix="job-timeout")
+
+
 def _run_job_with_timeout(func, timeout_sec: float = 30.0):
-    """Run a scheduler job in a non-blocking thread pool executor with a timeout."""
+    """Run a scheduler job in a shared thread pool with a timeout."""
     def wrapper(*args, **kwargs):
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError
-        executor = ThreadPoolExecutor(max_workers=1)
+        from concurrent.futures import TimeoutError
+        name = func.__name__ if hasattr(func, '__name__') else str(func)
         try:
-            future = executor.submit(func, *args, **kwargs)
+            future = _JOB_POOL.submit(func, *args, **kwargs)
             return future.result(timeout=timeout_sec)
         except TimeoutError:
-            logger.error(f"[Scheduler] Job {func.__name__ if hasattr(func, '__name__') else str(func)} timed out after {timeout_sec}s")
+            logger.error(f"[Scheduler] Job {name} timed out after {timeout_sec}s")
             return None
         except Exception as e:
-            logger.error(f"[Scheduler] Job {func.__name__ if hasattr(func, '__name__') else str(func)} failed: {e}")
+            logger.error(f"[Scheduler] Job {name} failed: {e}")
             return None
-        finally:
-            executor.shutdown(wait=False)
     if hasattr(func, '__name__'):
         wrapper.__name__ = func.__name__
     return wrapper
@@ -55,6 +63,21 @@ class Scheduler:
             return
 
         logger.info("[Scheduler] Initializing Python cron jobs...")
+
+        # Route APScheduler's own logger into loguru (2026-08-21): misfires,
+        # "maximum number of running instances reached" skips, and job crashes were
+        # invisible — a 4-day dead focus_job produced zero log lines. Now they land
+        # in the main log where the tripwire's human can see them.
+        import logging as _logging
+
+        class _APSIntercept(_logging.Handler):
+            def emit(self, record):
+                lvl = "WARNING" if record.levelno >= _logging.WARNING else "INFO"
+                logger.log(lvl, f"[APScheduler] {record.getMessage()}")
+        _aps = _logging.getLogger("apscheduler")
+        _aps.setLevel(_logging.INFO)
+        if not any(isinstance(h, _APSIntercept) for h in _aps.handlers):
+            _aps.addHandler(_APSIntercept())
 
         # Moomoo background reconnect — runs every 5 min, ALL hours. Two failure modes:
         #   1) Hard disconnect (is_connected=False): reconnect.
@@ -104,15 +127,26 @@ class Scheduler:
                 healthy = False
             if healthy:
                 return
-            try:
+            # Rebuild under a hard timeout (audit C1, 2026-08-13): a bare close()+connect()
+            # against a wedged socket blocked for 3h06m on 08-12 — and with max_instances=1
+            # the stuck instance suppressed every subsequent 5-min tick, turning a blip
+            # into a 3-hour outage. Bounded: fail fast, next tick retries in 5 min.
+            def _rebuild():
                 moomoo_service.close()
-                ok = moomoo_service.connect()
+                return moomoo_service.connect()
+            ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
+                ok = ex.submit(_rebuild).result(timeout=60)
                 if ok:
                     logger.success("[Scheduler] Moomoo wedged-connection rebuild succeeded.")
                 else:
                     logger.warning("[Scheduler] Moomoo wedged-connection rebuild failed.")
+            except concurrent.futures.TimeoutError:
+                logger.warning("[Scheduler] Moomoo rebuild TIMED OUT (60s) — next tick retries.")
             except Exception as e:
                 logger.warning(f"[Scheduler] Moomoo wedged-connection rebuild error: {e}")
+            finally:
+                ex.shutdown(wait=False)
         self.scheduler.add_job(
             _moomoo_reconnect_tick,
             CronTrigger.from_crontab("*/5 * * * *", timezone=pytz.utc),
@@ -244,7 +278,15 @@ class Scheduler:
         
         self.scheduler.add_job(sentiment_snapshot_job, CronTrigger.from_crontab("0 13-21 * * mon-fri", timezone=pytz.utc), id="sentiment_snapshot_job")
 
-        # Options Snapshots (Every 4 hours during market hours - options data is heavy)
+        # options_snapshot_job DISABLED 2026-08-13 (audit Z1): 100% failure since the
+        # NumPy 2 upgrade (np.float64 repr -> psycopg2 emits `np.float64(...)` -> Postgres
+        # "schema np does not exist"); zero successful snapshots ever logged, nothing
+        # reads the table, and each run wasted 3 full option-chain fetches/day. NOTE:
+        # options_engine.get_chain_data() is still used live by signal_aggregator — only
+        # the snapshot cron is dead weight.
+        # pcr_spike_job DISABLED 2026-08-13 (audit Z2): body has been commented out for
+        # months — it only logged "not implemented" 24x/day and burned a DB connection.
+        _ = """
         from services._legacy.options_engine import options_engine
         def options_snapshot_job():
             db = SessionLocal()
@@ -254,25 +296,15 @@ class Scheduler:
                     options_engine.save_snapshot(sym)
             finally:
                 db.close()
-        
         self.scheduler.add_job(options_snapshot_job, CronTrigger.from_crontab("0 14,18,22 * * mon-fri", timezone=pytz.utc), id="options_snapshot_job")
-
-        # PCR Monitor (Every hour)
-        def pcr_job():
-            db = SessionLocal()
-            try:
-                symbols = [s.symbol for s in db.query(UserWatchlist).all()]
-                if symbols:
-                    # options_service.monitor_pcr_spikes(symbols)
-                    logger.warning("[Scheduler] monitor_pcr_spikes not implemented. Skipping.")
-            finally:
-                db.close()
-        
-        self.scheduler.add_job(pcr_job, CronTrigger.from_crontab("0 * * * *", timezone=pytz.utc), id="pcr_spike_job")
-
+        """
         # Prediction Auto-Resolve (Every 6 hours)
         from services.prediction_service import prediction_service
-        self.scheduler.add_job(prediction_service.resolve_pending_predictions, CronTrigger.from_crontab("0 */6 * * *", timezone=pytz.utc), id="prediction_resolve_job")
+        # prediction_resolve_job removed 2026-08-13 (audit C2): resolution now has ONE
+        # owner — heartbeat_monitor.check_predictions (*/15 market hours + hourly
+        # off-hours), which also notifies outcomes. Row lock + completed-bar guard in
+        # resolve_prediction make any residual overlap safe. pm2 moopredict-resolver
+        # daemon stopped for the same reason.
 
         # --- OpenClaw Autonomous Triggers ---
         from services.openclaw_service import openclaw_service
@@ -331,7 +363,7 @@ class Scheduler:
             except Exception as e:
                 logger.error(f"[Scheduler] Focus failed: {e}")
         self.scheduler.add_job(
-            _run_focus,
+            _run_job_with_timeout(_run_focus, 300.0),
             CronTrigger.from_crontab("14 12 * * mon-fri", timezone=pytz.utc),
             id="focus_job",
             max_instances=1,
@@ -348,8 +380,10 @@ class Scheduler:
             except Exception as e:
                 logger.error(f"[Scheduler] Focus intraday failed: {e}")
         self.scheduler.add_job(
-            _run_focus_intraday,
-            CronTrigger.from_crontab("*/30 13-20 * * mon-fri", timezone=pytz.utc),
+            _run_job_with_timeout(_run_focus_intraday, 240.0),
+            # 13-19 UTC (was 13-20): last tick 19:30 UTC = 15:30 ET. Post-close ticks
+            # were overwriting confidence + produced the one look-ahead flip (audit C3).
+            CronTrigger.from_crontab("*/30 13-19 * * mon-fri", timezone=pytz.utc),
             id="focus_intraday_job",
             max_instances=1,
         )
@@ -382,7 +416,7 @@ class Scheduler:
             except Exception as e:
                 logger.error(f"[Scheduler] Position-watch failed: {e}")
         self.scheduler.add_job(
-            _run_position_watch,
+            _run_job_with_timeout(_run_position_watch, 300.0),
             CronTrigger.from_crontab("20 12 * * mon-fri", timezone=pytz.utc),
             id="position_watch_job",
             max_instances=1,
@@ -443,6 +477,30 @@ class Scheduler:
             misfire_grace_time=4 * 3600,
         )
 
+        # 1c5. Stats reports — kf's scheduled short stats to Telegram (2026-08-10 ask):
+        # 01:30 UTC = 9:30am MYT and 12:00 UTC = 8:00pm MYT, weekdays. Deterministic
+        # 3-line report (scorecard / active book / system status) via notification_queue.
+        def _run_stats_report():
+            try:
+                from services.stats_reporter import send_report
+                send_report()
+            except Exception as e:
+                logger.error(f"[Scheduler] Stats report failed: {e}")
+        self.scheduler.add_job(
+            _run_stats_report,
+            CronTrigger.from_crontab("30 1 * * mon-fri", timezone=pytz.utc),
+            id="stats_report_am_job",
+            max_instances=1,
+            misfire_grace_time=2 * 3600,
+        )
+        self.scheduler.add_job(
+            _run_stats_report,
+            CronTrigger.from_crontab("0 12 * * mon-fri", timezone=pytz.utc),
+            id="stats_report_pm_job",
+            max_instances=1,
+            misfire_grace_time=2 * 3600,
+        )
+
         # 1c4. Spread snapshot — refreshes data/costs.json with REGULAR-HOURS bid/ask
         # (14:35 UTC = 10:35 ET, mid-morning liquidity). Premarket spreads run 10-100x
         # RTH (XLP measured 144bps premarket vs ~2bps RTH) — scorecard costs must come
@@ -454,7 +512,7 @@ class Scheduler:
             except Exception as e:
                 logger.error(f"[Scheduler] Spread snapshot failed: {e}")
         self.scheduler.add_job(
-            _run_spread_snapshot,
+            _run_job_with_timeout(_run_spread_snapshot, 180.0),
             CronTrigger.from_crontab("35 14 * * mon-fri", timezone=pytz.utc),
             id="spread_snapshot_job",
             max_instances=1,
@@ -471,7 +529,7 @@ class Scheduler:
             except Exception as e:
                 logger.error(f"[Scheduler] Position-intel failed: {e}")
         self.scheduler.add_job(
-            _run_position_intel,
+            _run_job_with_timeout(_run_position_intel, 300.0),
             CronTrigger.from_crontab("18 12 * * mon-fri", timezone=pytz.utc),
             id="position_intel_job",
             max_instances=1,
@@ -521,8 +579,10 @@ class Scheduler:
         # 3. Pre-market Scan (13:00 UTC)
         self.scheduler.add_job(heartbeat_monitor.generate_premarket_scan, CronTrigger.from_crontab("0 13 * * mon-fri", timezone=pytz.utc), id="heartbeat_premarket_scan")
 
-        # 4. Off-hours Heartbeat (Every hour)
-        self.scheduler.add_job(heartbeat_monitor.run_full_check, CronTrigger.from_crontab("0 * * * *", timezone=pytz.utc), id="heartbeat_offhours_job")
+        # 4. Off-hours Heartbeat — COMPLEMENT hours only (audit H1: "0 * * * *"
+        # overlapped the */15 market-hours job, running every full check twice and
+        # double-sending alerts 9x/day).
+        self.scheduler.add_job(heartbeat_monitor.run_full_check, CronTrigger.from_crontab("0 0-12,22-23 * * *", timezone=pytz.utc), id="heartbeat_offhours_job")
 
         # --- Maintenance & Intelligence Jobs ---
         
@@ -532,10 +592,8 @@ class Scheduler:
         def accuracy_report_job():
             db = SessionLocal()
             try:
-                from services.prediction_service import prediction_service
-                # Resolve pending first for current data
-                prediction_service.resolve_pending_predictions()
-                
+                # (2026-08-13) no pre-resolve here — heartbeat owns resolution (audit C2).
+
                 yesterday = datetime.utcnow() - timedelta(days=1)
                 results = db.query(Prediction).filter(Prediction.resolved_at >= yesterday).all()
                 
@@ -619,6 +677,15 @@ class Scheduler:
         watchdog_service.start()
         self.is_running = True
         logger.info("[Scheduler] Jobs scheduled and running.")
+
+        # Stats-report catch-up: a full app restart (Mac reboot) loses missed cron
+        # slots (in-memory jobstore). If a report slot passed within its grace window,
+        # send it now instead of silently skipping the day (lost 9:30am, 2026-08-13).
+        try:
+            from services.stats_reporter import send_if_missed_on_startup
+            send_if_missed_on_startup()
+        except Exception as e:
+            logger.error(f"[Scheduler] Stats catch-up failed: {e}")
 
     def shutdown(self):
         """Gracefully shutdown the scheduler."""

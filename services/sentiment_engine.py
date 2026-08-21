@@ -36,11 +36,22 @@ class SentimentEngine:
         db = SessionLocal()
         try:
             symbol = symbol.upper().strip()
+            # news_intel.scraped_at is timestamptz — use an AWARE cutoff so the window
+            # is exactly lookback_hours (a naive cutoff was interpreted in session TZ
+            # and silently widened 48h to 56h). social_posts is naive-UTC: naive cutoff.
+            since_aware = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
             since = datetime.utcnow() - timedelta(hours=lookback_hours)
-            
-            # 1. Fetch Data
-            news = db.query(NewsIntel).filter(NewsIntel.headline.ilike(f"%{symbol}%"), NewsIntel.scraped_at >= since).all()
-            social = db.query(SocialPost).filter(SocialPost.content.ilike(f"%{symbol}%"), SocialPost.scraped_at >= since).all()
+
+            # 1. Fetch recent rows, then match in Python via word-boundary ticker/alias
+            # matching (audit 2026-08-13: ILIKE '%SPY%' matched 0/519 headlines — news
+            # writes "Nvidia" and "S&P 500", not "NVDA"/"SPY"; and '%SMH%' matched HTML
+            # junk). matches_ticker covers $TICKER, \bTICKER\b, and company aliases.
+            from services.political_monitor import matches_ticker
+            recent_news = db.query(NewsIntel).filter(NewsIntel.scraped_at >= since_aware).all()
+            news = [n for n in recent_news
+                    if matches_ticker(f"{n.headline or ''} {n.summary or ''}", symbol)]
+            recent_social = db.query(SocialPost).filter(SocialPost.scraped_at >= since).all()
+            social = [p for p in recent_social if matches_ticker(p.content or "", symbol)]
             
             if not news and not social:
                 return {"score": 0.0, "label": "NEUTRAL", "reason": "No recent data found.", "count": 0}

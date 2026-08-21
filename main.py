@@ -1075,6 +1075,10 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"content": f"🤖 *Auto-Draft* — posted {res.get('posted')} prediction(s): {ids}"}
             return {"content": f"⚠️ Auto-Draft failed: {res.get('error')}"}
 
+        if command == "stats":
+            from services.stats_reporter import compose_short_report
+            return {"content": "📈 *MooPredict stats*\n" + compose_short_report()}
+
         if command == "snapback":
             from services.snapback_engine import snapback_engine
             res = snapback_engine.generate()

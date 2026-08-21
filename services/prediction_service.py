@@ -415,25 +415,10 @@ class PredictionService:
         finally:
             db.close()
 
-    def _market_traded_since(self, symbol: str, created_at: datetime) -> bool:
-        """
-        Holiday guard: True if at least one trading session (daily kline bar) exists
-        on/after the creation date. Prevents resolving on frozen holiday prices
-        (the Jul 4 weekend bug — predictions #37-40 resolved WRONG at 0.00% move
-        because the market never opened during their window).
-        Fails OPEN (returns True) on any error so it can never block resolution.
-        """
-        try:
-            import pandas as pd
-            from services.ta_engine import ta_engine
-            df = ta_engine._get_kline_data(symbol, num=10)
-            if df is None or df.empty or "time_key" not in df.columns:
-                return True
-            bar_dates = pd.to_datetime(df["time_key"]).dt.date
-            return any(d >= created_at.date() for d in bar_dates)
-        except Exception as e:
-            logger.warning(f"[Prediction] holiday guard failed for {symbol}: {e} — allowing resolution")
-            return True
+    # _market_traded_since (the feed-probing holiday guard) was removed 2026-08-13:
+    # bar-based grading in resolve_prediction subsumes it — a prediction simply stays
+    # pending until a completed session bar on/after its creation date exists. The old
+    # guard trusted stale-but-well-formed kline caches and false-deferred #189-192.
 
     def resolve_prediction(self, prediction_id: int, manual_notes: str = "", force: bool = False) -> Dict:
         """
@@ -442,21 +427,18 @@ class PredictionService:
         """
         db = SessionLocal()
         try:
-            prediction = db.query(Prediction).filter(Prediction.id == prediction_id).first()
+            # Row lock (audit C2, 2026-08-13): multiple resolvers raced the old
+            # check-then-act and resolved #169/#171 twice. FOR UPDATE serializes;
+            # the outcome re-check below then holds within this transaction.
+            prediction = (db.query(Prediction)
+                          .filter(Prediction.id == prediction_id)
+                          .with_for_update()
+                          .first())
             if not prediction:
                 return {"success": False, "error": "Prediction not found"}
 
             if prediction.outcome:
                 return {"success": False, "error": "Already resolved"}
-
-            # Holiday guard: if no trading session occurred since creation, defer
-            # (extend deadline by 1 day) instead of resolving on a frozen price.
-            if not force and prediction.created_at and not self._market_traded_since(prediction.symbol, prediction.created_at):
-                prediction.deadline = (prediction.deadline or datetime.utcnow()) + timedelta(days=1)
-                db.commit()
-                logger.info(f"[Prediction] #{prediction.id} deferred — no trading session since creation (holiday/weekend). Deadline extended to {prediction.deadline}.")
-                return {"success": False, "deferred": True,
-                        "reason": "no trading session since creation — deadline extended 1 day"}
             
             # Check for 10-trading-day auto-expire to NEUTRAL
             if not prediction.created_at:
@@ -481,28 +463,59 @@ class PredictionService:
                     "move_pct": 0.0
                 }
 
-            # Get current price
-            # Resolution price source (fixed 2026-07-07): prefer the latest DAILY KLINE
-            # close over get_stock_quote. On Jul 7, #43 resolved on a stale cached quote
-            # (Thursday's close) while the Mac slept, even though Monday's session had
-            # traded — klines returned the correct close the whole time. Klines are
-            # authoritative market data; the quote cache can lie after sleep/outage.
-            exit_price = 0.0
-            try:
-                from services.ta_engine import ta_engine
-                kdf = ta_engine._get_kline_data(prediction.symbol, num=3)
-                if kdf is not None and not kdf.empty:
-                    exit_price = float(kdf["close"].iloc[-1])
-            except Exception as ke:
-                logger.warning(f"[Prediction] kline exit price failed for {prediction.symbol}: {ke}")
-            if exit_price <= 0:
-                price_data = moomoo_service.get_stock_quote(prediction.symbol)
-                exit_price = price_data.get("last_price", 0.0)
+            # BAR-BASED GRADING (2026-08-13 audit C1/H3/H4 rewrite).
+            # Old scheme graded prior-close -> "latest price", which (a) gifted the
+            # model the overnight gap already visible at call time, (b) graded 16% of
+            # rows against a live in-progress bar, and (c) let deferred rows span 2+
+            # sessions unmarked. New scheme: grade OPEN -> CLOSE of the completed
+            # daily bar(s) of the session(s) starting on the creation day (US/Eastern).
+            # Only strictly-past bars are graded; timing of the resolver run no longer
+            # changes the measured window. force=True (manual) may grade today's bar.
+            import math
+            import pandas as pd
+            from zoneinfo import ZoneInfo
+            from services.ta_engine import ta_engine
 
-            if exit_price <= 0:
-                return {"success": False, "error": "Could not fetch exit price"}
+            ET = ZoneInfo("America/New_York")
+            created_et_date = (created_at.replace(tzinfo=ZoneInfo("UTC"))
+                               .astimezone(ET).date())
+            today_et_date = datetime.utcnow().replace(tzinfo=ZoneInfo("UTC")).astimezone(ET).date()
 
-            move_pct = ((exit_price - prediction.entry_price) / prediction.entry_price) * 100 if prediction.entry_price > 0 else 0
+            kdf = ta_engine._get_kline_data(prediction.symbol, num=30)
+            if kdf is None or kdf.empty or "time_key" not in kdf.columns:
+                return {"success": False, "error": "no kline data — left pending"}
+            bar_dates = list(pd.to_datetime(kdf["time_key"]).dt.date)
+
+            entry_idx = next((i for i, d in enumerate(bar_dates) if d >= created_et_date), None)
+            if entry_idx is None:
+                # Session hasn't printed yet (weekend/holiday/stale feed) — stay
+                # pending; the next resolver run retries. No deadline mutation.
+                return {"success": False, "pending": True,
+                        "reason": "no completed session since creation yet"}
+            hold = max(int(prediction.timeframe_days or 1), 1)
+            exit_idx = entry_idx + hold - 1
+            if exit_idx >= len(bar_dates):
+                return {"success": False, "pending": True,
+                        "reason": f"hold window ({hold}d) not complete yet"}
+            if bar_dates[exit_idx] >= today_et_date and not force:
+                # Bar may still be forming (or same-day: session not finalized).
+                return {"success": False, "pending": True,
+                        "reason": "exit bar not finalized yet"}
+
+            entry_price = float(kdf["open"].iloc[entry_idx])
+            exit_price = float(kdf["close"].iloc[exit_idx])
+            if any(v is None or math.isnan(v) or v <= 0 for v in (entry_price, exit_price)):
+                return {"success": False, "error": "invalid bar prices — left pending"}
+
+            # Re-stamp entry to the tradable session open; keep the original quote
+            # (typically the prior close) in notes for the audit trail.
+            original_entry = prediction.entry_price
+            prediction.entry_price = entry_price
+            move_pct = (exit_price - entry_price) / entry_price * 100
+
+            graded_note = (f"Graded open->close {bar_dates[entry_idx]}"
+                           + (f"..{bar_dates[exit_idx]}" if exit_idx != entry_idx else "")
+                           + f" (bar-based v2; original pre-open entry {original_entry}).")
             
             # Resolution threshold v2 (2026-07-06): lowered 0.5% -> 0.3%.
             # Analytics at n=18 showed WR identical at 0.1/0.2/0.3% (38.9%) vs 22.2% at 0.5% —
@@ -522,7 +535,7 @@ class PredictionService:
             prediction.exit_price = exit_price
             prediction.actual_move_pct = move_pct
             prediction.resolved_at = datetime.utcnow()
-            prediction.notes = manual_notes
+            prediction.notes = f"{graded_note} {manual_notes}".strip()
 
             # Analytics: stamp threshold-would-be-right flags for 0.1/0.2/0.3/0.5%
             flags = compute_threshold_flags(prediction.direction, move_pct)

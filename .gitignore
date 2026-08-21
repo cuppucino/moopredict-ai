@@ -23,7 +23,6 @@ yarn-debug.log*
 yarn-error.log*
 
 # Runtime output (regenerated daily by morning brief cron)
-data/morning_briefs/
 .tsx/
 
 # IDEs
@@ -47,6 +46,7 @@ ENV/
 env/
 .env
 .env.*
+data/
 
 # Large Binaries & Data
 *.7z
