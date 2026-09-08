@@ -519,6 +519,24 @@ class Scheduler:
             misfire_grace_time=4 * 3600,
         )
 
+        # 1c6. News digest + shadow scorer (12:08 UTC = 20:08 MYT, before the 12:14
+        # focus run so both read the same news window). LLM writes the "why" per
+        # symbol + logs a shadow news score NEXT TO the keyword score. Never touches
+        # the prediction path — forward-only validation data (2026-09-08, kf-approved).
+        def _run_news_digest():
+            try:
+                from services.news_digest import run_daily
+                run_daily()
+            except Exception as e:
+                logger.error(f"[Scheduler] News digest failed: {e}")
+        self.scheduler.add_job(
+            _run_job_with_timeout(_run_news_digest, 600.0),
+            CronTrigger.from_crontab("8 12 * * mon-fri", timezone=pytz.utc),
+            id="news_digest_job",
+            max_instances=1,
+            misfire_grace_time=2 * 3600,
+        )
+
         # 1d. Position-Intel — daily intelligence briefing on the user's held positions
         # (12:18 UTC = 20:18 MYT, 2 min before position-watch). Gathers earnings / sentiment /
         # matched news per holding -> data/position_intel/. See position_intel_engine.py.
