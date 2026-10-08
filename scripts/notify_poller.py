@@ -27,7 +27,7 @@ oc_config = get_openclaw_config()
 
 # Main Credentials
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or oc_config.get("channels", {}).get("telegram", {}).get("botToken")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or "REMOVED_PRIVATE_VALUE"
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # News Credentials (New)
 BOT_TOKEN_NEWS = os.getenv("TELEGRAM_BOT_TOKEN_NEWS")
@@ -54,8 +54,8 @@ def send_telegram(notif):
         target_chat = CHAT_ID_NEWS or CHAT_ID # Fallback if channel ID not set
         logger.info(f"Routing to NEWS bot/channel: {target_chat}")
     
-    if not target_token:
-        logger.error(f"No token available for category: {category}")
+    if not target_token or not target_chat:
+        logger.error(f"Telegram token or chat ID missing for category: {category}")
         return False
 
     # Simple HTML escaping
@@ -82,30 +82,34 @@ def send_telegram(notif):
 
 def mark_sent(notification_id):
     try:
-        requests.post(f"{BASE_URL}/api/notifications/mark-sent", json={"id": notification_id}, timeout=5)
+        response = requests.post(f"{BASE_URL}/api/notifications/mark-sent", json={"id": notification_id}, timeout=5)
+        response.raise_for_status()
+        return True
     except Exception as e:
         logger.error(f"Failed to mark notification {notification_id} as sent: {e}")
+        return False
 
 def poll():
     logger.info(f"🚀 MooPredict Notification Poller started (Python)")
     logger.info(f"   MooPredict : {BASE_URL}")
     logger.info(f"   Telegram   : chat {CHAT_ID}")
     
-    if not BOT_TOKEN:
-        logger.error("❌ No Telegram bot token found!")
+    if not BOT_TOKEN or not CHAT_ID:
+        logger.error("❌ Telegram bot token or chat ID is missing!")
         return
 
     while True:
         try:
             response = requests.get(f"{BASE_URL}/api/notifications/pending", timeout=5)
+            response.raise_for_status()
             pending = response.json()
             
             if pending:
                 logger.info(f"📬 Found {len(pending)} pending notifications")
                 for notif in pending:
                     if send_telegram(notif):
-                        mark_sent(notif["id"])
-                        logger.info(f"  ✅ Sent & marked #{notif['id']}")
+                        if mark_sent(notif["id"]):
+                            logger.info(f"  ✅ Sent & marked #{notif['id']}")
                         
         except Exception as e:
             logger.warning(f"Connection error: {e}")

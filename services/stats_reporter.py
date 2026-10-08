@@ -27,11 +27,19 @@ def _scorecard_line() -> str:
     if not m.get("n_resolved"):
         return "📊 no resolved predictions in 30d window"
     vs = m.get("wr_vs_benchmark", 0.0)
-    return (f"📊 WR {m['win_rate']*100:.1f}% ({vs*100:+.1f}pp vs "
+    line = (f"📊 WR {m['win_rate']*100:.1f}% ({vs*100:+.1f}pp vs "
             f"{m['benchmark_always_up']*100:.1f}%) n={m['n_resolved']} | "
-            f"PF {m['profit_factor']:.2f} | +{m['expectancy_after_costs_bps']:.0f}bps/trade"
-            if m.get("expectancy_after_costs_bps") is not None else
-            f"📊 WR {m['win_rate']*100:.1f}% n={m['n_resolved']} | PF {m['profit_factor']:.2f}")
+            f"PF {m['profit_factor']:.2f}")
+    if m.get("expectancy_after_costs_bps") is not None:
+        line += f" | {m['expectancy_after_costs_bps']:+.0f}bps/trade"
+    # Edge vs always-UP: THE number that decides if the system has skill.
+    edge = m.get("edge_vs_always_up") or {}
+    if edge.get("mean_bps") is not None:
+        t = edge.get("t_stat")
+        line += (f"\n⚔️ edge vs always-UP: {edge['mean_bps']:+.1f}bps/call "
+                 f"(t={t if t is not None else '—'}, "
+                 f"{edge['n_discordant']}/{edge['n']} deviating calls)")
+    return line
 
 
 def _book_line() -> str:
@@ -90,7 +98,33 @@ def _system_line() -> str:
 
 
 def compose_short_report() -> str:
-    return "\n".join([_scorecard_line(), _book_line(), _system_line()])
+    from services.intraday_paper import intraday_paper_service, ACCOUNT_ID, COMPARATOR_ID
+    from services.intraday_forecast import intraday_forecast_service
+    from services.intraday_operations import intraday_operations
+    paper = intraday_paper_service.report()
+    if ACCOUNT_ID not in paper["accounts"]:
+        return "Legacy daily predictions (paper experiment not initialized):\n" + "\n".join(
+            [_scorecard_line(), _book_line(), _system_line()])
+    state = paper["accounts"][ACCOUNT_ID]["state"]
+    control = paper["accounts"][COMPARATOR_ID]["state"]
+    forecasts = intraday_forecast_service.summary()
+    operation = intraday_operations.last_result or {}
+    missing = sum(len(d["symbols"]) for d in forecasts["missing_sessions"])
+    score = (f"range {forecasts['magnitude_in_range_rate']:.0%}, endpoint {forecasts['endpoint_direction_rate']:.0%} "
+             f"vs always-UP {forecasts['always_up_baseline']['endpoint_direction_rate']:.0%}") if forecasts["n"] else "collecting forward observations"
+    issue = state["data_uncertain"] or state.get("market_data_errors") or operation.get("status") != "ok"
+    session = paper["accounts"][ACCOUNT_ID].get("diagnostics", {}).get("session", {})
+    session_line = (f"Last paper session {session['session_date']}: equity change ${session['equity_change_usd']:+.4f}; "
+                    f"closed-trade price P&L ${session['gross_price_pnl_usd']:+.4f}, costs ${session['closed_trade_costs_usd']:.4f}; "
+                    f"session cash benchmark ${session['cash_benchmark_equity']:.4f}."
+                    if session.get("session_date") else "Session attribution not available yet.")
+    return "\n".join([
+        f"PAPER $100: equity ${state['equity']:.3f}; net ${state['equity']-100:+.3f}; closed trades {state['closed_trades']}; costs ${state['costs']:.3f}.",
+        session_line,
+        f"Benchmarks: cash $100; without forecast ${control['equity']:.3f}. Observed drawdown ${state['max_drawdown']:.3f}.",
+        f"Forecast v2 n={forecasts['n']} ({forecasts['distinct_sessions']} sessions): {score}. Pending {forecasts['pending']}; missing {missing} since Sep 23.",
+        f"{'CHECK DATA / equity may be stale' if issue else 'Paper worker OK'}; {'open position' if state['position'] else 'unresolved order' if state['pending'] else 'flat'}. Assumed costs; no real orders.",
+    ])
 
 
 def send_if_missed_on_startup(grace_hours: float = 2.0) -> bool:

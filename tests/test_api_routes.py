@@ -75,7 +75,9 @@ def test_create_prediction_api_success(mock_prediction_service):
         catalyst="Strong earnings outlook",
         category="general",
         timeframe_days=7,
-        force=True
+        target_price=None,
+        force=True,
+        prediction_tag=None,
     )
 
 

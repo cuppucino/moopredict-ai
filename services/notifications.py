@@ -1,67 +1,71 @@
+"""Durable Telegram outbox; delivery is at-least-once and acknowledged by the poller."""
 import uuid
 from datetime import datetime
-from typing import List, Dict
+from sqlalchemy.exc import IntegrityError
+from core.database import SessionLocal, NotificationOutbox
 from loguru import logger
 
-def is_market_active() -> bool:
-    """Check if market or pre-market is active (Mon-Fri 12:00 - 21:00 UTC)."""
-    import pytz
+
+def is_market_active():
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("America/New_York"))
+    return now.weekday() < 5 and 8 <= now.hour < 17
+
+
+def enqueue_in_session(db, message, level="info", category="general", dedupe_key=None):
+    """Commit a notification with the event it describes; reuse its durable identity."""
+    if dedupe_key:
+        found = db.query(NotificationOutbox).filter_by(dedupe_key=dedupe_key).first()
+        if found:
+            return found.id
+    row = NotificationOutbox(id=str(uuid.uuid4()), dedupe_key=dedupe_key, message=message,
+                             level=level.lower(), category=category.lower())
     try:
-        now_utc = datetime.now(pytz.utc)
-        # Weekday: Mon=0, Tue=1, Wed=2, Thu=3, Fri=4
-        if now_utc.weekday() >= 5:
-            return False
-        current_hour = now_utc.hour + now_utc.minute / 60.0
-        return 12.0 <= current_hour <= 21.0
-    except Exception as e:
-        logger.error(f"Error checking market active: {e}")
-        return True # Default to True (safe fallback) to avoid silent suppression on error
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+    except IntegrityError:
+        if not dedupe_key:
+            raise
+        return db.query(NotificationOutbox).filter_by(dedupe_key=dedupe_key).one().id
+    return row.id
+
 
 class NotificationQueue:
-    def __init__(self, max_size: int = 100):
-        self.queue: List[Dict] = []
-        self.max_size = max_size
+    def __init__(self, max_size=100, session_factory=SessionLocal):
+        self.session_factory = session_factory
+        self.batch_size = max_size
 
-    def enqueue(self, message: str, level: str = "info", category: str = "general"):
-        """Add a new notification to the queue with a category for routing."""
-        category_lower = category.lower()
-        level_lower = level.lower()
-
-        # Suppress only stale_data and heartbeat_warning off-hours (except level='alert')
-        if category_lower in ("stale_data", "heartbeat_warning") and level_lower != "alert":
+    def enqueue(self, message, level="info", category="general", dedupe_key=None):
+        if category.lower() in ("stale_data", "heartbeat_warning") and level.lower() != "alert":
             if not is_market_active():
-                logger.info(f"[Queue] Off-hours suppression: Suppressing {level.upper()} notification ({category}): {message[:50]}...")
-                return
+                return None
+        with self.session_factory() as db:
+            key = enqueue_in_session(db, message, level, category, dedupe_key)
+            db.commit()
+        logger.info(f"[Outbox] enqueued {key} ({category})")
+        return key
 
-        notification = {
-            "id": str(uuid.uuid4()),
-            "message": message,
-            "level": level,
-            "category": category_lower,
-            "sent": False,
-            "created_at": datetime.utcnow().isoformat()
-        }
-        self.queue.append(notification)
-        logger.info(f"[Queue] Enqueued {level.upper()} notification ({category}): {message[:50]}...")
-        
-        # Keep queue size within limits
-        if len(self.queue) > self.max_size:
-            self.queue.pop(0)
+    def get_pending(self):
+        with self.session_factory() as db:
+            rows = (db.query(NotificationOutbox).filter(NotificationOutbox.sent_at.is_(None))
+                    .order_by(NotificationOutbox.created_at, NotificationOutbox.id)
+                    .limit(self.batch_size).all())
+            return [{"id": r.id, "message": r.message, "level": r.level, "category": r.category,
+                     "sent": False, "created_at": r.created_at.isoformat()} for r in rows]
 
-    def get_pending(self) -> List[Dict]:
-        """Return notifications that haven't been sent."""
-        return [n for n in self.queue if not n["sent"]]
-
-    def mark_as_sent(self, notification_id: str):
-        """Mark a notification as sent."""
-        for n in self.queue:
-            if n["id"] == notification_id:
-                n["sent"] = True
-                break
+    def mark_as_sent(self, notification_id):
+        with self.session_factory() as db:
+            row = db.get(NotificationOutbox, notification_id)
+            if row and row.sent_at is None:
+                row.sent_at = datetime.utcnow()
+                db.commit()
 
     def clear(self):
-        """Clear the queue."""
-        self.queue = []
+        with self.session_factory() as db:
+            db.query(NotificationOutbox).filter(NotificationOutbox.sent_at.is_(None)).update(
+                {NotificationOutbox.sent_at: datetime.utcnow()})
+            db.commit()
 
-# Singleton instance
+
 notification_queue = NotificationQueue()

@@ -1,5 +1,6 @@
 import feedparser
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from loguru import logger
 from core.database import SessionLocal, NewsIntel
 from services.notifications import notification_queue
@@ -11,6 +12,21 @@ FEEDS = [
     {"name": "MarketWatch", "url": "https://www.marketwatch.com/rss/topstories"},
     {"name": "Google News", "url": "https://news.google.com/rss/search?q=US+stock+market&hl=en-US&gl=US&ceid=US:en"},
 ]
+
+
+def publication_time(entry):
+    """Only an explicit publication date; updated/scraped times are not substitutes."""
+    raw = entry.get("published")
+    if not raw:
+        return None
+    try:
+        try:
+            stamp = parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return stamp.astimezone(timezone.utc) if stamp.tzinfo is not None else None
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        return None
 
 class NewsScraper:
     def run(self):
@@ -24,6 +40,7 @@ class NewsScraper:
             for feed in FEEDS:
                 try:
                     response = requests.get(feed["url"], headers=headers, timeout=10)
+                    response.raise_for_status()
                     parsed = feedparser.parse(response.text)
                     logger.debug(f"[NewsScraper] Feed {feed['name']} returned {len(parsed.entries)} entries.")
                     # Limit to top 10 items per feed
@@ -42,7 +59,8 @@ class NewsScraper:
                                 headline=headline,
                                 summary=summary,
                                 source=feed["name"],
-                                url=url
+                                url=url,
+                                published_at=publication_time(entry),
                             )
                             db.add(news_item)
                             new_headlines.append(f"• [{feed['name']}] {headline}")

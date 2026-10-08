@@ -2,7 +2,7 @@ import pandas as pd
 import pandas_ta as ta
 from scipy import stats
 from typing import Dict, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 from loguru import logger
 from futu import *
 from services.moomoo_service import moomoo_service
@@ -31,6 +31,7 @@ class TAEngine:
             ret, df = moomoo_service.quote_ctx.get_cur_kline(moomoo_symbol, num, SubType.K_DAY, AuType.QFQ)
             if ret != RET_OK:
                 raise Exception(f"Failed to get K-lines: {df}")
+            df.attrs["provider_retrieved_at"] = datetime.now(timezone.utc).isoformat()
             return df
 
         return breaker.call(_fetch_from_moomoo, cache_key=f"kline:{symbol}")
@@ -48,6 +49,12 @@ class TAEngine:
 
         try:
             signals = []
+            from services.intraday_market import archive_bars
+            source = archive_bars(df, {"provider": "futu", "symbol": symbol,
+                "timeframe": "daily", "adjustment": "QFQ",
+                "last_bar_at": str(df.iloc[-1].get("time_key", df.index[-1])),
+                "provider_retrieved_at": df.attrs.get("provider_retrieved_at"),
+                "purpose": "premarket_legacy_technical_input"})
             
             # 1. RSI (14) - D-Tier (Lagging)
             rsi = df.ta.rsi(length=14)
@@ -162,6 +169,7 @@ class TAEngine:
                 "label": label,
                 "regime": regime,
                 "signals": [s.__dict__ for s in signals],
+                "source": source,
                 "timestamp": datetime.now().isoformat()
             }
 
@@ -234,6 +242,7 @@ class TAEngine:
         return {
             "symbol": symbol,
             "price": res["price"],
+            "source": res.get("source"),
             "rsi": round(rsi_val, 2),
             "vwap": round(vwap_info.get("value", 0), 2),
             "composite_score": res["composite_score"],

@@ -148,6 +148,31 @@ def compute_metrics(session: Session) -> dict:
                           if net_bps_list else None)
         avg_cost_bps = (round(sum(_round_trip_bps(costs, p.symbol) for p in resolved) / n, 2))
 
+        # THE decisive edge metric (2026-08-21, kf-approved redesign): paired per-call
+        # signed-bps difference vs the always-UP benchmark on the IDENTICAL graded
+        # window. A call identical to the benchmark (UP) contributes exactly 0; every
+        # DOWN call contributes +/-2x the move. Unlike hit-rate-vs-53.5%, this needs
+        # no 16-month discordant-pair accumulation — the t-stat is valid at any n and
+        # every deviation moves it. Positive mean + t>2 = real evidence of skill.
+        deltas = []
+        for p in resolved:
+            if p.actual_move_pct is None:
+                continue
+            model_signed = p.actual_move_pct if p.direction == "UP" else -p.actual_move_pct
+            benchmark_signed = p.actual_move_pct  # always-UP is always long
+            deltas.append((model_signed - benchmark_signed) * 100.0)
+        n_disc = sum(1 for d in deltas if d != 0.0)
+        if deltas:
+            mean_d = sum(deltas) / len(deltas)
+            var_d = (sum((d - mean_d) ** 2 for d in deltas) / (len(deltas) - 1)
+                     if len(deltas) > 1 else 0.0)
+            se = (var_d / len(deltas)) ** 0.5 if var_d > 0 else 0.0
+            t_stat = round(mean_d / se, 2) if se > 0 else None
+            edge_vs_always_up = {"mean_bps": round(mean_d, 2), "t_stat": t_stat,
+                                 "n": len(deltas), "n_discordant": n_disc}
+        else:
+            edge_vs_always_up = {"mean_bps": None, "t_stat": None, "n": 0, "n_discordant": 0}
+
         # Profit factor
         gross_win = sum(pct_pnl(p) for p in wins)
         gross_loss = sum(pct_pnl(p) for p in losses)
@@ -169,6 +194,7 @@ def compute_metrics(session: Session) -> dict:
             "high_conviction": high_conviction,
             "brier": brier,                       # model calibration (lower better)
             "brier_always_up": brier_baseline,    # beat this or confidence is noise
+            "edge_vs_always_up": edge_vs_always_up,
             "expectancy_after_costs_bps": expectancy_bps,
             "avg_cost_bps": avg_cost_bps,
             "cost_model_session": costs.get("session", "fallback"),

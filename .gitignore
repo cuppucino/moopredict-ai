@@ -5,7 +5,14 @@ node_modules/
 
 # Testing
 coverage/
-tests/
+tests/*
+!tests/test_intraday_forecast.py
+!tests/test_intraday_paper.py
+!tests/test_intraday_operations.py
+!tests/test_ta_engine.py
+!tests/test_moomoo_connection_lifecycle.py
+!tests/test_evidence_quality.py
+!tests/test_paper_diagnostics.py
 
 # Production
 dist/
@@ -56,3 +63,24 @@ data/
 *.parquet
 moomoo_OpenD_*/
 .claude/
+
+# Private configuration, credentials, and local account data
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+.openclaw/
+.aws/
+
+# Local databases, journals, and caches
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+trades.md
+.pytest_cache/

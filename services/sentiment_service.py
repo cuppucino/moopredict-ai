@@ -6,7 +6,8 @@ class SentimentService:
         """Compatibility wrapper for the new VADER-based SentimentEngine."""
         res = sentiment_engine.score_symbol(symbol)
         if "error" in res:
-            return {"score": 0, "label": "NEUTRAL", "reason": f"Error: {res['error']}", "data_count": 0}
+            return {"score": 0, "label": "UNAVAILABLE", "reason": f"Error: {res['error']}", "data_count": 0,
+                    "evidence_quality": {"status": "unavailable"}}
         
         # Add compatibility fields if missing
         if "reason" not in res:

@@ -686,6 +686,19 @@ class Scheduler:
         from services import track_record
         self.scheduler.add_job(track_record.run_daily_job, CronTrigger.from_crontab("30 21 * * mon-fri", timezone=pytz.utc), id="track_record_daily")
 
+        # One owner until each experiment tick actually finishes. Startup catches
+        # missed sessions and unresolved positions; all cutoffs use exchange time.
+        from services.intraday_operations import intraday_operations
+        self.scheduler.add_job(
+            intraday_operations.tick, CronTrigger(second=10, timezone=pytz.utc),
+            id="intraday_experiment_tick", max_instances=1, coalesce=True,
+            misfire_grace_time=45, next_run_time=datetime.now(pytz.utc),
+        )
+        self.scheduler.add_job(
+            intraday_operations.watchdog, CronTrigger(second=50, timezone=pytz.utc),
+            id="intraday_experiment_watchdog", max_instances=1, misfire_grace_time=30,
+        )
+
         self.scheduler.start()
         
         # Trigger an initial heartbeat check in a background thread to ensure fresh startup state

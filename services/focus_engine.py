@@ -26,6 +26,7 @@ from services.sentiment_engine import sentiment_engine
 from services.ta_engine import ta_engine
 from services.political_monitor import TICKER_ALIASES
 from core.database import SessionLocal, NewsIntel, Prediction
+from services.evidence_quality import news_record, summarize_evidence
 
 FOCUS_ETFS = ["SPY", "QQQ", "SMH", "XLE"]
 
@@ -120,17 +121,22 @@ def _term_patterns(symbol: str) -> list:
     return [re.compile(r"\b" + re.escape(t.strip().lower()) + r"\b") for t in terms if t.strip()]
 
 
-def _news_signal(symbol: str) -> Tuple[float, str]:
+def _news_signal(symbol: str, trace=None) -> Tuple[float, str]:
     """Deterministic news read: sentiment on the ETF + driver-keyword news over 48h. [-1,+1]."""
     # base: the sentiment engine's per-symbol score (already lexicon-scored)
     try:
-        s = sentiment_engine.score_symbol(symbol) or {}
+        s = (sentiment_engine.score_symbol(symbol, trace=trace) if trace is not None
+             else sentiment_engine.score_symbol(symbol)) or {}
+        if trace is not None:
+            trace["sentiment_result"] = s
         base = float(s.get("score", 0.0) or 0.0)
         # data_count on the populated path, count on the empty path (audit H1: reading
         # only "count" was always 0 and silently disarmed the coverage dampener).
         base_n = int(s.get("data_count", s.get("count", 0)) or 0)
-    except Exception:
+    except Exception as exc:
         base, base_n = 0.0, 0
+        if trace is not None:
+            trace["sentiment_result"] = {"error": str(exc)}
 
     # driver news: scan 48h headlines for the ETF's aliases + driver terms (whole-word),
     # net bull/bear WORD counts. timestamptz column -> aware cutoff (exact 48h window).
@@ -143,11 +149,16 @@ def _news_signal(symbol: str) -> Tuple[float, str]:
     finally:
         db.close()
     matched, bull, bear = 0, 0, 0
+    if trace is not None:
+        trace["driver_news"] = []
+        trace["observed_at"] = datetime.now(timezone.utc).isoformat()
     for n in news:
         text = f"{n.headline or ''} {n.summary or ''}".lower()
         for phrase in _NEUTRALIZE:
             text = text.replace(phrase, " ")
         if any(p.search(text) for p in patterns):
+            if trace is not None:
+                trace["driver_news"].append(news_record(n))
             matched += 1
             bull += sum(bool(p.search(text)) for p in _BULL_RE)
             bear += sum(bool(p.search(text)) for p in _BEAR_RE)
@@ -160,13 +171,18 @@ def _news_signal(symbol: str) -> Tuple[float, str]:
     # still only half-counts (guards against one-story flips).
     coverage = min(1.0, (base_n + matched) / 2.0)
     sig = _clamp(raw * coverage, -1.0, 1.0)
+    if trace is not None:
+        trace["driver_quality"] = summarize_evidence(trace["driver_news"], observed_at=trace["observed_at"])
     return sig, f"sent={base:+.2f}/{base_n} driver={driver:+.2f}({matched}n) -> {sig:+.2f}"
 
 
-def _technical_signal(symbol: str) -> Tuple[float, str]:
+def _technical_signal(symbol: str, trace=None) -> Tuple[float, str]:
     """PLAIN-CODE technical read from ta_engine: composite score + RSI. [-1,+1]."""
     try:
         a = ta_engine.get_full_analysis(symbol) or {}
+        if trace is not None:
+            trace["analysis"] = a
+            trace["timeframe"] = "daily; legacy technical input, not session VWAP"
     except Exception as e:
         return 0.0, f"TA error: {e}"
     if not a or a.get("price") is None:
@@ -186,17 +202,48 @@ def _technical_signal(symbol: str) -> Tuple[float, str]:
 
 
 class FocusEngine:
-    def generate(self) -> Dict:
-        results, posted_ids = [], []
+    def assess(self, capture_sources=False) -> list:
+        """Return the model output without storing or modifying a prediction.
+
+        Callers that run experiments can persist this exact probability themselves;
+        `prediction_service` must not silently become a second forecasting model.
+        """
+        results = []
         for etf in FOCUS_ETFS:
-            news_sig, news_det = _news_signal(etf)
-            tech_sig, tech_det = _technical_signal(etf)
+            sources = {"news": {}, "technical": {}}
+            news_sig, news_det = _news_signal(etf, sources["news"]) if capture_sources else _news_signal(etf)
+            tech_sig, tech_det = _technical_signal(etf, sources["technical"]) if capture_sources else _technical_signal(etf)
             prior = PRIORS.get(etf, DEFAULT_PRIOR)
             p = _clamp(prior + W_NEWS * news_sig + W_TECH * tech_sig, 0.05, 0.95)
             direction = "UP" if p >= 0.5 else "DOWN"
             confidence = round((p if direction == "UP" else 1 - p) * 100, 1)
-            results.append({"etf": etf, "direction": direction, "confidence": confidence,
-                            "p_up": round(p, 3), "news": news_det, "tech": tech_det})
+            results.append({
+                "etf": etf,
+                "direction": direction,
+                "confidence": confidence,
+                "model_score": confidence,
+                "score_calibration": "uncalibrated; not a measured probability of success",
+                "p_up": round(p, 4),
+                "prior": prior,
+                "news_sig": round(news_sig, 4),
+                "tech_sig": round(tech_sig, 4),
+                "news": news_det,
+                "tech": tech_det,
+                "weights": {"news": W_NEWS, "technical": W_TECH},
+                **({"sources": sources} if capture_sources else {}),
+            })
+        return results
+
+    def generate(self) -> Dict:
+        results, posted_ids = self.assess(), []
+        for item in results:
+            etf = item["etf"]
+            direction = item["direction"]
+            confidence = item["confidence"]
+            p = item["p_up"]
+            prior = item["prior"]
+            news_sig, tech_sig = item["news_sig"], item["tech_sig"]
+            news_det, tech_det = item["news"], item["tech"]
 
             catalyst = (f"[FOCUS] {etf} {direction} @ {confidence}% — news[{news_det}] "
                         f"tech[{tech_det}] prior={prior} -> P(up)={p:.2f}")
@@ -223,10 +270,11 @@ class FocusEngine:
         return {"success": bool(posted_ids), "posted": len(posted_ids), "ids": posted_ids, "results": results}
 
     def intraday_update(self) -> Dict:
-        """Re-evaluate the 4 ETFs against FRESH news every 30 min during market hours. Keeps
-        today's standing prediction reactive: if a signal has FLIPPED direction on breaking news,
-        update that prediction in place + alert. One prediction per ETF/day — the final state at
-        the deadline is what resolves — so scoring stays clean while the call stays current.
+        """Re-evaluate the four ETFs and log changes without rewriting the original call.
+
+        A revised view cannot receive credit for price movement that occurred before the
+        revision existed.  The immutable four-hour experiment records revisions as separate
+        events; this legacy daily track now preserves its originally broadcast direction.
 
         Audit fixes 2026-08-13 (C3/H2): (1) no updates at/after 15:30 ET — a flip in the
         final 30 min (or after close: the one historical flip fired 16:30 ET) is graded on
@@ -262,14 +310,9 @@ class FocusEngine:
                     continue
                 if pred.direction != new_dir:
                     old = pred.direction
-                    pred.direction, pred.confidence = new_dir, new_conf
-                    # APPEND the revision — never destroy the original thesis.
-                    pred.catalyst = (f"{pred.catalyst} || [intraday-revised {old}->{new_dir} "
-                                     f"{datetime.utcnow():%H:%M}Z @ {new_conf}% — news[{news_det}] "
-                                     f"tech[{tech_det}]]")
-                    db.commit()
-                    changes.append(f"{etf} {old}->{new_dir} @ {new_conf}%")
-                    logger.warning(f"[Focus] INTRADAY FLIP {etf} {old}->{new_dir} on fresh news")
+                    changes.append(f"{etf} view {old}->{new_dir} @ {new_conf}% (original preserved)")
+                    logger.warning(f"[Focus] INTRADAY VIEW CHANGE {etf} {old}->{new_dir}; "
+                                   "original forecast preserved")
                     _log_decision("intraday", etf, prior, news_sig, tech_sig, p, new_dir, new_conf,
                                   prediction_id=pred.id, news_det=news_det, tech_det=tech_det,
                                   applied_change=f"{old}->{new_dir}")

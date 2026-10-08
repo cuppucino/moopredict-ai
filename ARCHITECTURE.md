@@ -1,6 +1,14 @@
 # MooPredict — System Architecture
 
-> Last updated: 2026-05-28 — focused on the current state after the MCPT cost-unification work.
+> Current experiment (2026-09-28): [four-hour forecasts](docs/FOUR_HOUR_PAPER_EXPERIMENT.md)
+> feed a separate [$100 paper trader](docs/INTRADAY_PAPER_TRADER.md). The active path is
+> `intraday_operations → intraday_forecast / intraday_paper → PostgreSQL + Telegram outbox`.
+> `intraday_market` owns exchange calendars, bar timestamps, completeness and raw archives.
+> Live broker orders remain hard-disabled. The legacy execution/gating diagram below is
+> historical context, not the architecture of the new paper experiment.
+
+> Last updated: 2026-09-07 — the L1–L3 MCPT pipeline below (adapters, optimizer, validator, walkforward, nightly gating) was retired to `services/_legacy/mcpt/`. Validation is now run per-hypothesis via `scripts/mcpt_*.py` and logged in `scratch/openclaw_research_loop/TRIAL_LEDGER.md`. Live trading is hard-disabled (paper-prediction only). Layer descriptions kept for the mental model.
+> Previous update: 2026-05-28 — focused on the state after the MCPT cost-unification work.
 > For older narrative context (Telegram bot, decision-loop history), see [docs/SYSTEM_OVERVIEW.md](docs/SYSTEM_OVERVIEW.md).
 
 ---
@@ -41,18 +49,18 @@ A signal at L1 must survive L2 validation before L3 can mark it LIVE; only then 
 |---|---|
 | [main.py](main.py) | FastAPI server. Starts scheduler, exposes REST API. |
 | [core/scheduler.py](core/scheduler.py) | APScheduler cron — ~20 jobs (scrapers, briefings, MCPT nightly, trading loop). |
-| [services/mcpt_nightly.py](services/mcpt_nightly.py) | The MCPT pipeline runner. Cron entry point for L2 + L3. |
+| [services/_legacy/mcpt_nightly.py](services/_legacy/mcpt_nightly.py) | The MCPT pipeline runner. Cron entry point for L2 + L3. |
 | [services/trading_loop.py](services/trading_loop.py) | Market-hours decision cycle. Calls `decision_engine`. |
 
 ### Layer 1 — Signal generation
 
 | File | Signal |
 |---|---|
-| [services/mcpt/adapters/rsi_adapter.py](services/mcpt/adapters/rsi_adapter.py) | RSI oversold/overbought |
-| [services/mcpt/adapters/vwap_adapter.py](services/mcpt/adapters/vwap_adapter.py) | VWAP mean-reversion |
-| [services/mcpt/adapters/reversal_adapter.py](services/mcpt/adapters/reversal_adapter.py) | Reversal pattern |
-| [services/mcpt/adapters/volume_profile_adapter.py](services/mcpt/adapters/volume_profile_adapter.py) | Volume cluster |
-| [services/mcpt/adapters/signal_aggregator_adapter.py](services/mcpt/adapters/signal_aggregator_adapter.py) | Consensus of the above 4 |
+| [services/_legacy/mcpt/adapters/rsi_adapter.py](services/_legacy/mcpt/adapters/rsi_adapter.py) | RSI oversold/overbought |
+| [services/_legacy/mcpt/adapters/vwap_adapter.py](services/_legacy/mcpt/adapters/vwap_adapter.py) | VWAP mean-reversion |
+| [services/_legacy/mcpt/adapters/reversal_adapter.py](services/_legacy/mcpt/adapters/reversal_adapter.py) | Reversal pattern |
+| [services/_legacy/mcpt/adapters/volume_profile_adapter.py](services/_legacy/mcpt/adapters/volume_profile_adapter.py) | Volume cluster |
+| [services/_legacy/mcpt/adapters/signal_aggregator_adapter.py](services/_legacy/mcpt/adapters/signal_aggregator_adapter.py) | Consensus of the above 4 |
 
 Adapters return `+1 / 0 / -1` per bar. They do **not** compute returns — that's centralized in `validator.py` / `walkforward.py` to avoid lookahead bias.
 
@@ -60,18 +68,18 @@ Adapters return `+1 / 0 / -1` per bar. They do **not** compute returns — that'
 
 | File | Role |
 |---|---|
-| [services/mcpt/optimizer.py](services/mcpt/optimizer.py) | Grid-search best params per adapter |
-| [services/mcpt/validator.py](services/mcpt/validator.py) | In-sample permutation test → `insample_p` |
-| [services/mcpt/walkforward.py](services/mcpt/walkforward.py) | Rolling out-of-sample test → `wf_p` |
-| [services/mcpt/costs.py](services/mcpt/costs.py) | **Single source of truth** for transaction costs (`ROUND_TRIP_BPS`, `PER_FLIP_BPS`) |
-| [services/mcpt/profit_factor.py](services/mcpt/profit_factor.py) | PF = gross profit / gross loss |
+| [services/_legacy/mcpt/optimizer.py](services/_legacy/mcpt/optimizer.py) | Grid-search best params per adapter |
+| [services/_legacy/mcpt/validator.py](services/_legacy/mcpt/validator.py) | In-sample permutation test → `insample_p` |
+| [services/_legacy/mcpt/walkforward.py](services/_legacy/mcpt/walkforward.py) | Rolling out-of-sample test → `wf_p` |
+| [services/_legacy/mcpt/costs.py](services/_legacy/mcpt/costs.py) | **Single source of truth** for transaction costs (`ROUND_TRIP_BPS`, `PER_FLIP_BPS`) |
+| [services/_legacy/mcpt/profit_factor.py](services/_legacy/mcpt/profit_factor.py) | PF = gross profit / gross loss |
 | [scripts/calibrate_costs.py](scripts/calibrate_costs.py) | Empirically calibrate `ROUND_TRIP_BPS` from Moomoo fills (**not yet run**) |
 
 ### Layer 3 — Gating
 
 | File | Role |
 |---|---|
-| [services/mcpt_nightly.py](services/mcpt_nightly.py) | Runs nightly, applies pre-registered gating rules, writes to `MCPTResult` table |
+| [services/_legacy/mcpt_nightly.py](services/_legacy/mcpt_nightly.py) | Runs nightly, applies pre-registered gating rules, writes to `MCPTResult` table |
 
 **Gating rules:**
 
@@ -188,7 +196,7 @@ This is the core thing to understand. It runs nightly per (strategy, ticker) pai
 ### What's working
 - ✅ MCPT validation pipeline end-to-end (just fixed and re-verified)
 - ✅ Transaction-cost model unified across optimizer / validator / walkforward
-- ✅ Signal-timing audit confirms no lookahead bias ([validator.py:25,56,165,207](services/mcpt/validator.py#L25))
+- ✅ Signal-timing audit confirms no lookahead bias ([validator.py:25,56,165,207](services/_legacy/mcpt/validator.py#L25))
 - ✅ 21 tests covering cost scaling, Moomoo history parsing, indicators
 
 ### What's currently DISABLED (i.e. not trading)
@@ -216,7 +224,7 @@ This is the core thing to understand. It runs nightly per (strategy, ticker) pai
 
 ## How a New Strategy Gets to LIVE
 
-1. Write an adapter in `services/mcpt/adapters/` returning `+1 / 0 / -1` signals.
+1. Write an adapter in `services/_legacy/mcpt/adapters/` returning `+1 / 0 / -1` signals.
 2. Add it to `mcpt_nightly.py`'s ticker × strategy loop.
 3. Wait 5 nightly runs (bootstrap freeze → WATCHLIST/DISABLED only).
 4. After run 5: if `insample_p < 0.01` AND `wf_p < 0.05` AND `EMA_p < 0.04`, promotes to **LIVE**.

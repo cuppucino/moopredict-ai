@@ -2,6 +2,7 @@ import os
 import time
 import socket
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock, Thread
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
@@ -15,6 +16,11 @@ from loguru import logger
 # toggle) plus the existing SystemState.real_trading_unlocked gate.
 LIVE_TRADING_ENABLED = False
 
+# SDK constructors retry indefinitely even when OpenD accepts TCP but rejects
+# the SDK handshake. Bound callers' wait and share one owned attempt instead.
+CONNECT_WAIT_SECONDS = 8.0
+QUERY_CONNECT_TIMEOUT_SECONDS = 5.0
+
 
 class MoomooService:
     def __init__(self, host: str = None, port: int = None):
@@ -27,6 +33,10 @@ class MoomooService:
         self.trd_env: TrdEnv = TrdEnv.REAL
         self.trd_market: TrdMarket = TrdMarket.HK
         self.is_connected: bool = False
+        self._connection_lock = Lock()
+        self._connection_attempt: Optional[Thread] = None
+        self._connection_epoch = 0
+        self._closing = False
         self._pos_cache = None
         self._pos_cache_expiry = datetime.now()
         self._bal_cache = None
@@ -93,35 +103,103 @@ class MoomooService:
             return False
 
     def connect(self) -> bool:
-        """Initialize connection to OpenD with smart IP discovery."""
-        target_ips = self.discover_opend_ip()
+        """Reuse healthy contexts or wait briefly for one shared connection attempt.
+
+        The SDK cannot cancel a constructor that is retrying its handshake. Keep
+        that attempt owned until it ends; repeated callers must not start more.
+        """
+        with self._connection_lock:
+            if self.is_connected:
+                return True
+            if self._closing:
+                return False
+            attempt = self._connection_attempt
+            if attempt is None or not attempt.is_alive():
+                attempt = Thread(
+                    target=self._connect_attempt,
+                    args=(self._connection_epoch,),
+                    name="moomoo-connect",
+                    daemon=True,
+                )
+                self._connection_attempt = attempt
+                attempt.start()
+
+        attempt.join(timeout=CONNECT_WAIT_SECONDS)
+        with self._connection_lock:
+            connected = self.is_connected
+        if not connected and attempt.is_alive():
+            logger.warning("[Moomoo] Connection still pending; reusing the existing attempt on retry.")
+        return connected
+
+    @staticmethod
+    def _dispose_contexts(*contexts):
+        """Attempt every cleanup, including when one SDK close raises."""
+        for context in contexts:
+            if context is not None:
+                try:
+                    context.close()
+                except Exception as exc:
+                    logger.warning(f"[Moomoo] Context cleanup failed ({type(exc).__name__}).")
+
+    def _attempt_current(self, epoch: int) -> bool:
+        with self._connection_lock:
+            return epoch == self._connection_epoch and not self._closing
+
+    def _connect_attempt(self, epoch: int):
+        """Own construction and cleanup; publish only a complete, current pair."""
+        with self._connection_lock:
+            if epoch != self._connection_epoch or self._closing:
+                return
+            stale = (self.trd_ctx, self.quote_ctx)
+            self.trd_ctx = self.quote_ctx = None
+            self.is_connected = False
+        self._dispose_contexts(*stale)
+
+        try:
+            target_ips = self.discover_opend_ip()
+        except Exception as exc:
+            logger.warning(f"[Moomoo] Discovery failed ({type(exc).__name__}).")
+            return
 
         for ip in target_ips:
+            trade = quote = None
             try:
+                if not self._attempt_current(epoch):
+                    return
                 if not self._port_reachable(ip, self.port):
                     logger.warning(f"[Moomoo] OpenD port {ip}:{self.port} unreachable — skipping "
                                    f"(is OpenD running and logged in?)")
                     continue
                 logger.info(f"[Moomoo] Trying to connect to OpenD at {ip}:{self.port}...")
-                self.trd_ctx = OpenSecTradeContext(host=ip, port=self.port)
-                self.quote_ctx = OpenQuoteContext(host=ip, port=self.port)
-                
-                ret, data = self.trd_ctx.get_acc_list()
+                trade = OpenSecTradeContext(host=ip, port=self.port)
+                trade.set_sync_query_connect_timeout(QUERY_CONNECT_TIMEOUT_SECONDS)
+                if not self._attempt_current(epoch):
+                    return
+                quote = OpenQuoteContext(host=ip, port=self.port)
+                quote.set_sync_query_connect_timeout(QUERY_CONNECT_TIMEOUT_SECONDS)
+                if not self._attempt_current(epoch):
+                    return
+
+                ret, data = trade.get_acc_list()
                 if ret == RET_OK:
+                    with self._connection_lock:
+                        if epoch != self._connection_epoch or self._closing:
+                            return
+                        self._initialize_account(data)
+                        self.host = ip
+                        self.trd_ctx, self.quote_ctx = trade, quote
+                        self.is_connected = True
+                        trade = quote = None  # Ownership transferred to the service.
                     logger.success(f"[Moomoo] Connected successfully to {ip}")
-                    self.host = ip
-                    self.is_connected = True
-                    self._initialize_account(data)
-                    return True
+                    return
                 else:
-                    logger.warning(f"[Moomoo] Connection to {ip} failed: {data}")
-                    self.close()
-            except Exception as e:
-                # Don't log full exception for every IP during scan
-                pass
+                    logger.warning(f"[Moomoo] Account query failed for {ip}; closing this attempt.")
+            except Exception as exc:
+                logger.warning(f"[Moomoo] Connection to {ip} failed ({type(exc).__name__}).")
+            finally:
+                self._dispose_contexts(trade, quote)
                 
         logger.error("[Moomoo] Failed to connect to any target IP. Please check if OpenD is running.")
-        return False
 
     def _initialize_account(self, acc_list_df):
         """Identify and set the correct trading account."""
@@ -573,12 +651,20 @@ class MoomooService:
         return False
 
     def close(self):
-        """Clean up connections."""
-        if self.trd_ctx:
-            self.trd_ctx.close()
-        if self.quote_ctx:
-            self.quote_ctx.close()
-        self.is_connected = False
+        """Detach contexts and invalidate any connection still being constructed."""
+        with self._connection_lock:
+            self._connection_epoch += 1
+            self.is_connected = False
+            if self._closing:
+                return
+            self._closing = True
+            contexts = (self.trd_ctx, self.quote_ctx)
+            self.trd_ctx = self.quote_ctx = None
+        try:
+            self._dispose_contexts(*contexts)
+        finally:
+            with self._connection_lock:
+                self._closing = False
         logger.info("Moomoo connections closed.")
 
 # Singleton instance

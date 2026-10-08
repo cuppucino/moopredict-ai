@@ -5,6 +5,7 @@ from loguru import logger
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from core.database import SessionLocal, NewsIntel, SocialPost, SentimentSnapshot, UserWatchlist
 from services.ai_service import ai_service
+from services.evidence_quality import news_record, summarize_evidence
 
 class SentimentEngine:
     def __init__(self):
@@ -31,7 +32,7 @@ class SentimentEngine:
         scores = self.analyzer.polarity_scores(text)
         return scores['compound']
 
-    def score_symbol(self, symbol: str, lookback_hours: int = 48) -> Dict:
+    def score_symbol(self, symbol: str, lookback_hours: int = 48, trace=None) -> Dict:
         """Aggregate sentiment from multiple sources with time decay."""
         db = SessionLocal()
         try:
@@ -52,9 +53,23 @@ class SentimentEngine:
                     if matches_ticker(f"{n.headline or ''} {n.summary or ''}", symbol)]
             recent_social = db.query(SocialPost).filter(SocialPost.scraped_at >= since).all()
             social = [p for p in recent_social if matches_ticker(p.content or "", symbol)]
+            observed_at = datetime.now(timezone.utc)
+            news_inputs = [news_record(n) for n in news]
+            social_inputs = [{"id": p.id, "content": p.content,
+                              "scraped_at": p.scraped_at.isoformat() if p.scraped_at else None,
+                              "published_at": None} for p in social]
+            quality = summarize_evidence(news_inputs, social_inputs,
+                                         observed_at=observed_at, lookback_hours=lookback_hours)
+            if trace is not None:
+                trace["sentiment_inputs"] = {
+                    "observed_at": observed_at.isoformat(), "news": news_inputs,
+                    "social": social_inputs}
             
             if not news and not social:
-                return {"score": 0.0, "label": "NEUTRAL", "reason": "No recent data found.", "count": 0}
+                return {"symbol": symbol, "score": 0.0, "label": "NO_DATA",
+                        "reason": "No matching evidence; zero is a model fallback, not neutral evidence.",
+                        "count": 0, "data_count": 0, "news_count": 0, "social_count": 0,
+                        "evidence_quality": quality}
 
             # 2. Process & Weight
             weighted_scores = []
@@ -87,6 +102,7 @@ class SentimentEngine:
                 "data_count": len(news) + len(social),
                 "news_count": len(news),
                 "social_count": len(social),
+                "evidence_quality": quality,
                 "timestamp": now.isoformat()
             }
             

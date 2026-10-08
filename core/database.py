@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, Boolean, JSON, ForeignKey, Date
+from sqlalchemy import (create_engine, Column, Integer, String, Float, DateTime, Text,
+                        Boolean, JSON, ForeignKey, Date, UniqueConstraint)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, session
 from dotenv import load_dotenv
@@ -9,7 +10,7 @@ from loguru import logger
 load_dotenv()
 
 # Database URL adjustment for Docker/Local
-raw_url = os.getenv("DATABASE_URL", "postgresql://admin:password@localhost:5432/moopredict")
+raw_url = os.getenv("DATABASE_URL", "postgresql://localhost:5432/moopredict")
 db_url = raw_url.replace("localhost", "host.docker.internal") if os.path.exists("/.dockerenv") else raw_url
 
 engine = create_engine(
@@ -37,6 +38,9 @@ class NewsIntel(Base):
     source = Column(String(50))
     url = Column(Text, unique=True, nullable=False)
     scraped_at = Column(DateTime, default=datetime.utcnow)
+
+    # Null for legacy/undated articles. Collection time is not publication time.
+    published_at = Column(DateTime(timezone=True), nullable=True)
 
 class ManualPosition(Base):
     __tablename__ = "manual_positions"
@@ -178,6 +182,104 @@ class Prediction(Base):
     structure_signals = Column(JSON, nullable=True)      # e.g. ["demand_zone", "ote_band", "down_capitulation"]
     structure_confluence = Column(Integer, nullable=True)  # count of structure signals at entry
 
+
+class IntradayForecast(Base):
+    """Immutable premarket forecast for the four-hour paper experiment.
+
+    This is deliberately separate from Prediction: the old table grades daily bars and
+    permits intraday mutation.  A forecast here is an observation in a versioned
+    experiment and must retain exactly what was known when it was issued.
+    """
+    __tablename__ = "intraday_forecasts"
+    __table_args__ = (
+        UniqueConstraint("experiment", "strategy_version", "symbol", "session_date",
+                         name="uq_intraday_forecast_observation"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    experiment = Column(String(50), nullable=False, index=True)
+    strategy_version = Column(String(30), nullable=False)
+    symbol = Column(String(20), nullable=False, index=True)
+    session_date = Column(Date, nullable=False, index=True)
+    issued_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    window_start = Column(DateTime, nullable=False)
+    window_end = Column(DateTime, nullable=False)
+
+    direction = Column(String(10), nullable=False)  # UP | DOWN
+    confidence = Column(Float, nullable=False)
+    move_low_pct = Column(Float, nullable=False)    # favourable excursion, positive magnitude
+    move_high_pct = Column(Float, nullable=False)
+    sample_size = Column(Integer, nullable=False)
+    input_snapshot = Column(JSON, nullable=False, default=dict)
+
+    status = Column(String(20), nullable=False, default="FORECASTED", index=True)
+    reference_open = Column(Float)
+    zone_low_price = Column(Float)
+    zone_high_price = Column(Float)
+    actual_excursion_pct = Column(Float)
+    endpoint_return_pct = Column(Float)
+    target_reached = Column(Boolean)
+    magnitude_in_range = Column(Boolean)
+    result = Column(JSON, nullable=True)
+    resolved_at = Column(DateTime)
+
+class ForecastEvaluation(Base):
+    """Append-only evaluator versions; never overwrite an earlier published score."""
+    __tablename__ = "forecast_evaluations"
+    __table_args__ = (UniqueConstraint("forecast_id", "evaluator_version",
+                                      name="uq_forecast_evaluator"),)
+    id = Column(Integer, primary_key=True)
+    forecast_id = Column(Integer, ForeignKey("intraday_forecasts.id"), nullable=False)
+    evaluator_version = Column(String(60), nullable=False)
+    evaluated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    result = Column(JSON, nullable=False)
+
+
+class IntradayRun(Base):
+    __tablename__ = "intraday_runs"
+    key = Column(String(160), primary_key=True)
+    session_date = Column(Date, nullable=False, index=True)
+    kind = Column(String(30), nullable=False)
+    status = Column(String(30), nullable=False)
+    attempts = Column(Integer, nullable=False, default=0)
+    detail = Column(JSON, nullable=False, default=dict)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class NotificationOutbox(Base):
+    __tablename__ = "notification_outbox"
+    id = Column(String(36), primary_key=True)
+    dedupe_key = Column(String(200), unique=True, nullable=True)
+    message = Column(Text, nullable=False)
+    level = Column(String(20), nullable=False)
+    category = Column(String(50), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    sent_at = Column(DateTime, nullable=True, index=True)
+
+
+class PaperExperimentAccount(Base):
+    """Separate from all legacy/manual paper trades and real account state."""
+    __tablename__ = "paper_experiment_accounts"
+    id = Column(String(60), primary_key=True)
+    policy_version = Column(String(60), nullable=False)
+    config = Column(JSON, nullable=False)
+    state = Column(JSON, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class PaperExperimentEvent(Base):
+    __tablename__ = "paper_experiment_events"
+    __table_args__ = (UniqueConstraint("account_id", "event_key",
+                                      name="uq_paper_experiment_event"),)
+    id = Column(Integer, primary_key=True)
+    account_id = Column(String(60), ForeignKey("paper_experiment_accounts.id"), nullable=False)
+    event_key = Column(String(160), nullable=False)
+    kind = Column(String(30), nullable=False, index=True)
+    symbol = Column(String(20), nullable=True)
+    occurred_at = Column(DateTime, nullable=False)
+    payload = Column(JSON, nullable=False)
+
+
 class PaperTrade(Base):
     __tablename__ = "paper_trades"
     id = Column(Integer, primary_key=True, index=True)
@@ -308,6 +410,8 @@ def init_db():
     """Initialize the database tables."""
     try:
         Base.metadata.create_all(bind=engine)
+        from core.schema_migrations import ensure_news_publication_column
+        ensure_news_publication_column(engine)
         logger.info("[PostgreSQL] Tables initialized successfully (SQLAlchemy)")
     except Exception as e:
         logger.error(f"[PostgreSQL] Initialization error: {e}")

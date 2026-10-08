@@ -588,6 +588,62 @@ def get_predictions(active: bool = True, limit: int = 50, resolved_only: bool = 
         return prediction_service.get_active()
     return prediction_service.get_all(limit=limit, resolved_only=resolved_only)
 
+
+@app.get("/api/intraday-forecasts")
+def get_intraday_forecasts(limit: int = 100):
+    """Immutable forecasts and audit outcomes for the four-hour paper experiment."""
+    from services.intraday_forecast import intraday_forecast_service
+    return intraday_forecast_service.list(limit=limit)
+
+
+@app.get("/api/intraday-forecasts/summary")
+def get_intraday_forecast_summary():
+    """Forward scorecard, including the always-UP comparison."""
+    from services.intraday_forecast import intraday_forecast_service
+    return intraday_forecast_service.summary()
+
+
+@app.get("/api/intraday-forecasts/report/today")
+def get_intraday_forecast_report_today():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from fastapi.responses import PlainTextResponse
+    from services.intraday_forecast import intraday_forecast_service
+    day = datetime.now(ZoneInfo("America/New_York")).date()
+    return PlainTextResponse(intraday_forecast_service.render_report(day))
+
+
+@app.post("/api/intraday-forecasts/run")
+def run_intraday_forecast_now():
+    """Idempotent manual retry for today's premarket paper forecast."""
+    from services.intraday_forecast import intraday_forecast_service
+    return intraday_forecast_service.generate()
+
+
+@app.post("/api/intraday-forecasts/resolve")
+def resolve_intraday_forecasts_now():
+    """Manual retry for today's completed four-hour observations."""
+    from services.intraday_forecast import intraday_forecast_service
+    return intraday_forecast_service.resolve()
+
+@app.get("/api/paper-experiment")
+def get_paper_experiment():
+    from services.intraday_paper import intraday_paper_service
+    return intraday_paper_service.report()
+
+
+@app.get("/api/paper-experiment/events")
+def get_paper_experiment_events(limit: int = 100):
+    from services.intraday_paper import intraday_paper_service
+    return intraday_paper_service.events(limit)
+
+
+@app.get("/api/intraday-operations")
+def get_intraday_operations():
+    from services.intraday_operations import intraday_operations
+    return intraday_operations.status()
+
+
 @app.post("/api/predictions")
 def create_prediction(payload: dict):
     symbol = payload.get("symbol")

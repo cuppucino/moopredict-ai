@@ -126,16 +126,14 @@ class PositionWatchEngine:
                 if struct:
                     direction, source, confidence, tier = struct, "structure", 48.0, "MEDIUM"
                 else:
-                    # No news, no sentiment, no chart read. If the stock also has almost no
-                    # price history (recent listing — e.g. SKHY, Nasdaq debut mid-Jul), a
-                    # regime-default guess is fake precision: SKHY got 4 straight default-UP
-                    # misses while crashing. Honest output is NO CALL.
-                    if not self._has_history(sym):
-                        logger.info(f"[PositionWatch] {sym}: NO CALL — no signal and insufficient "
-                                    f"price history (recent listing); skipping instead of guessing")
-                        continue
-                    direction = "DOWN" if regime == "TREND_DOWN" else "UP"
-                    source, confidence, tier = "regime", 42.0, "LOW"
+                    # No news, no sentiment, no chart read -> NO CALL (2026-08-21,
+                    # kf-approved): the old regime-default tier produced a flood of
+                    # conf~43 coin flips (66% of all position calls, 48.8% hit rate)
+                    # on wide-spread names. Informational track only posts when a
+                    # real signal tier fires. (Same honesty rule that fixed SKHY.)
+                    logger.info(f"[PositionWatch] {sym}: NO CALL — no news/sentiment/"
+                                f"structure signal; skipping instead of guessing")
+                    continue
 
             catalyst = (
                 f"{POS_TAG} held-position daily read — {sym}, direction from {source} "
